@@ -75,58 +75,59 @@ const App: React.FC = () => {
     window.scrollTo(0, 0);
   }, []);
 
-  // --- FCM PUSH NOTIFICATION SETUP WITH CRASH PROTECTION ---
+  // --- FCM PUSH NOTIFICATION SETUP WITH ULTRA-SAFE GUARDS ---
   useEffect(() => {
-    // Only run on native platforms and when user is logged in
+    // 1. Guard against non-native or missing user
     if (!Capacitor.isNativePlatform() || !user?.id) return;
+    
+    // 2. Critical: Check if plugin is actually available to prevent crash
+    if (!Capacitor.isPluginAvailable('PushNotifications')) {
+        console.warn("PushNotifications plugin not found on this platform.");
+        return;
+    }
 
     let isSubscribed = true;
 
     const setupPush = async () => {
+      // 3. Delayed start to let UI settle
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
       try {
         const permission = await PushNotifications.requestPermissions();
         if (permission.receive === 'granted' && isSubscribed) {
-          // Create Notification Channel for Android Sound (Safe call)
+          
           await PushNotifications.createChannel({
             id: 'rizqdaan_notifications',
-            name: 'General Notifications',
-            description: 'Notifications for account, listings and deposits',
+            name: 'General',
+            description: 'Important updates',
             importance: 5,
             visibility: 1,
             vibration: true,
-          }).catch(e => console.warn("Channel creation failed", e));
+          }).catch(() => {});
 
-          await PushNotifications.register();
+          await PushNotifications.register().catch(e => console.error("Reg failed", e));
         }
 
+        // Listeners with internal try-catch
         PushNotifications.addListener('registration', async (token) => {
           if (isSubscribed && db && auth.currentUser) {
             try {
               await setDoc(doc(db, 'users', auth.currentUser.uid), { fcmToken: token.value }, { merge: true });
-            } catch (err) {
-              console.error("Failed to save token", err);
-            }
+            } catch (err) {}
           }
-        });
-
-        PushNotifications.addListener('registrationError', (error) => {
-          console.error("Push registration error", error);
         });
 
         PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
-          const data = notification.notification.data;
-          if (data && data.view) {
-             const targetView = data.view as AppView;
-             const payload: NavigatePayload = {};
-             if (data.listingId) {
-                 // Cross-reference data safely
-                 payload.query = data.listingId;
-             }
-             handleNavigate(targetView, payload);
-          }
+          try {
+              const data = notification.notification.data;
+              if (data?.view) {
+                 handleNavigate(data.view as AppView, data.listingId ? { query: data.listingId } : {});
+              }
+          } catch (err) {}
         });
+
       } catch (e) {
-        console.error("Push setup sequence failed", e);
+        console.error("Native push error caught", e);
       }
     };
 
@@ -134,9 +135,11 @@ const App: React.FC = () => {
 
     return () => {
       isSubscribed = false;
-      if (Capacitor.isNativePlatform()) {
-        PushNotifications.removeAllListeners();
-      }
+      try {
+          if (Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('PushNotifications')) {
+            PushNotifications.removeAllListeners();
+          }
+      } catch (e) {}
     };
   }, [user?.id, handleNavigate]);
 
