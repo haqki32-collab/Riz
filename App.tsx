@@ -3,6 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, Unsubscribe, sendEmailVerification } from 'firebase/auth';
 import { doc, setDoc, updateDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
+import { PushNotifications } from '@capacitor/push-notifications';
 
 import Header from './components/common/Header';
 import BottomNavBar from './components/common/BottomNavBar';
@@ -54,6 +55,78 @@ const App: React.FC = () => {
       return `${cleanName}-${randomNum}`;
   };
 
+  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
+    if (newView !== 'details' && newView !== 'subcategories') {
+      setSelectedListing(null); setSelectedCategory(null);
+    }
+    if (newView !== 'listings' && newView !== 'details') setSearchQuery('');
+    if (payload?.listing && newView === 'details') setSelectedListing(payload.listing);
+    if (payload?.category && newView === 'subcategories') setSelectedCategory(payload.category);
+    if (payload?.query !== undefined && newView === 'listings') setSearchQuery(payload.query);
+    if (payload?.targetUser && newView === 'chats') setChatTargetUser(payload.targetUser);
+    if (payload?.targetVendorId && newView === 'vendor-profile') setSelectedVendorId(payload.targetVendorId);
+
+    if (newView === 'add-listing') { setInitialVendorTab('add-listing'); setView('vendor-dashboard'); }
+    else if (newView === 'my-ads') { setInitialVendorTab('my-listings'); setView('vendor-dashboard'); }
+    else if (newView === 'vendor-analytics') { setInitialVendorTab('dashboard'); setView('vendor-dashboard'); }
+    else if (newView === 'promote-business') { setInitialVendorTab('promotions'); setView('vendor-dashboard'); }
+    else setView(newView);
+    window.scrollTo(0, 0);
+  }, []);
+
+  // --- FCM PUSH NOTIFICATION SETUP WITH SOUND ---
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const setupPush = async () => {
+      try {
+        const permission = await PushNotifications.requestPermissions();
+        if (permission.receive === 'granted') {
+          // Create Notification Channel for Android Sound
+          await PushNotifications.createChannel({
+            id: 'rizqdaan_notifications',
+            name: 'General Notifications',
+            description: 'Notifications for account, listings and deposits',
+            importance: 5, // High importance for sound/pop-up
+            visibility: 1,
+            vibration: true,
+          });
+
+          await PushNotifications.register();
+        }
+
+        PushNotifications.addListener('registration', async (token) => {
+          if (db && user?.id) {
+            await setDoc(doc(db, 'users', user.id), { fcmToken: token.value }, { merge: true });
+          }
+        });
+
+        PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
+          const data = notification.notification.data;
+          if (data && data.view) {
+             const targetView = data.view as AppView;
+             const payload: NavigatePayload = {};
+             if (data.listingId) {
+                 // In a production app, you might fetch this ID from Firestore first
+                 // but here we check if it exists in our current state
+                 const match = listingsDB.find(l => l.id === data.listingId);
+                 if (match) payload.listing = match;
+             }
+             handleNavigate(targetView, payload);
+          }
+        });
+      } catch (e) {
+        console.error("Push setup error", e);
+      }
+    };
+
+    setupPush();
+
+    return () => {
+      PushNotifications.removeAllListeners();
+    };
+  }, [user?.id, listingsDB.length, handleNavigate]);
+
   const mergeLocalUserData = (baseUser: User) => {
       const demoWallets = JSON.parse(localStorage.getItem('demo_user_wallets') || '{}');
       const demoHistory = JSON.parse(localStorage.getItem('demo_user_history') || '{}');
@@ -87,7 +160,6 @@ const App: React.FC = () => {
     let userUnsubscribe: Unsubscribe | null = null;
 
     const authUnsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      // MANDATORY VERIFICATION CHECK: Trap unverified users
       if (firebaseUser && firebaseUser.emailVerified) {
         if (db) {
             try {
@@ -118,7 +190,6 @@ const App: React.FC = () => {
         }
       } else {
         if (userUnsubscribe) { userUnsubscribe(); userUnsubscribe = null; }
-        // If logged in but NOT verified, force sign out to prevent session hijacking
         if (firebaseUser && !firebaseUser.emailVerified) {
             signOut(auth);
         }
@@ -174,25 +245,6 @@ const App: React.FC = () => {
     else document.documentElement.classList.remove('dark');
   }, [theme]);
 
-  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
-    if (newView !== 'details' && newView !== 'subcategories') {
-      setSelectedListing(null); setSelectedCategory(null);
-    }
-    if (newView !== 'listings' && newView !== 'details') setSearchQuery('');
-    if (payload?.listing && newView === 'details') setSelectedListing(payload.listing);
-    if (payload?.category && newView === 'subcategories') setSelectedCategory(payload.category);
-    if (payload?.query !== undefined && newView === 'listings') setSearchQuery(payload.query);
-    if (payload?.targetUser && newView === 'chats') setChatTargetUser(payload.targetUser);
-    if (payload?.targetVendorId && newView === 'vendor-profile') setSelectedVendorId(payload.targetVendorId);
-
-    if (newView === 'add-listing') { setInitialVendorTab('add-listing'); setView('vendor-dashboard'); }
-    else if (newView === 'my-ads') { setInitialVendorTab('my-listings'); setView('vendor-dashboard'); }
-    else if (newView === 'vendor-analytics') { setInitialVendorTab('dashboard'); setView('vendor-dashboard'); }
-    else if (newView === 'promote-business') { setInitialVendorTab('promotions'); setView('vendor-dashboard'); }
-    else setView(newView);
-    window.scrollTo(0, 0);
-  }, []);
-
   const handleLogin = async (email: string, password: string) => {
     try {
         if (email === 'admin@rizqdaan.com' && password === 'admin') {
@@ -202,7 +254,6 @@ const App: React.FC = () => {
         
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
         
-        // CHECK VERIFICATION STATUS ON LOGIN
         if (!userCredential.user.emailVerified) {
             await signOut(auth);
             return { 
@@ -220,8 +271,6 @@ const App: React.FC = () => {
   const handleSignup = async (userData: any) => {
     try {
         const userCredential = await createUserWithEmailAndPassword(auth, userData.email, userData.password || 'password123');
-        
-        // --- REAL EMAIL VERIFICATION ---
         await sendEmailVerification(userCredential.user);
         
         const newUserId = userCredential.user.uid;
@@ -233,8 +282,6 @@ const App: React.FC = () => {
             walletHistory: [], favorites: []
         };
         await setDoc(doc(db, "users", newUserId), newUserProfile);
-        
-        // MANDATORY: LOG OUT AFTER SIGNUP
         await signOut(auth);
         
         return { success: true, message: 'Signup successful! Verification email sent.', user: newUserProfile };
@@ -242,7 +289,6 @@ const App: React.FC = () => {
   };
 
   const handleVerifyAndLogin = async (userId: string) => {
-      // This is now redundant since we use Firebase Auth's verified property
       setView('auth');
   };
 
