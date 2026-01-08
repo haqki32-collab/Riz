@@ -4,6 +4,7 @@ import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, on
 import { doc, setDoc, updateDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
 import { PushNotifications } from '@capacitor/push-notifications';
+import { Capacitor } from '@capacitor/core';
 
 import Header from './components/common/Header';
 import BottomNavBar from './components/common/BottomNavBar';
@@ -74,31 +75,42 @@ const App: React.FC = () => {
     window.scrollTo(0, 0);
   }, []);
 
-  // --- FCM PUSH NOTIFICATION SETUP WITH SOUND ---
+  // --- FCM PUSH NOTIFICATION SETUP WITH CRASH PROTECTION ---
   useEffect(() => {
-    if (!user?.id) return;
+    // Only run on native platforms and when user is logged in
+    if (!Capacitor.isNativePlatform() || !user?.id) return;
+
+    let isSubscribed = true;
 
     const setupPush = async () => {
       try {
         const permission = await PushNotifications.requestPermissions();
-        if (permission.receive === 'granted') {
-          // Create Notification Channel for Android Sound
+        if (permission.receive === 'granted' && isSubscribed) {
+          // Create Notification Channel for Android Sound (Safe call)
           await PushNotifications.createChannel({
             id: 'rizqdaan_notifications',
             name: 'General Notifications',
             description: 'Notifications for account, listings and deposits',
-            importance: 5, // High importance for sound/pop-up
+            importance: 5,
             visibility: 1,
             vibration: true,
-          });
+          }).catch(e => console.warn("Channel creation failed", e));
 
           await PushNotifications.register();
         }
 
         PushNotifications.addListener('registration', async (token) => {
-          if (db && user?.id) {
-            await setDoc(doc(db, 'users', user.id), { fcmToken: token.value }, { merge: true });
+          if (isSubscribed && db && auth.currentUser) {
+            try {
+              await setDoc(doc(db, 'users', auth.currentUser.uid), { fcmToken: token.value }, { merge: true });
+            } catch (err) {
+              console.error("Failed to save token", err);
+            }
           }
+        });
+
+        PushNotifications.addListener('registrationError', (error) => {
+          console.error("Push registration error", error);
         });
 
         PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
@@ -107,25 +119,26 @@ const App: React.FC = () => {
              const targetView = data.view as AppView;
              const payload: NavigatePayload = {};
              if (data.listingId) {
-                 // In a production app, you might fetch this ID from Firestore first
-                 // but here we check if it exists in our current state
-                 const match = listingsDB.find(l => l.id === data.listingId);
-                 if (match) payload.listing = match;
+                 // Cross-reference data safely
+                 payload.query = data.listingId;
              }
              handleNavigate(targetView, payload);
           }
         });
       } catch (e) {
-        console.error("Push setup error", e);
+        console.error("Push setup sequence failed", e);
       }
     };
 
     setupPush();
 
     return () => {
-      PushNotifications.removeAllListeners();
+      isSubscribed = false;
+      if (Capacitor.isNativePlatform()) {
+        PushNotifications.removeAllListeners();
+      }
     };
-  }, [user?.id, listingsDB.length, handleNavigate]);
+  }, [user?.id, handleNavigate]);
 
   const mergeLocalUserData = (baseUser: User) => {
       const demoWallets = JSON.parse(localStorage.getItem('demo_user_wallets') || '{}');
