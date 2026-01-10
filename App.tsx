@@ -34,7 +34,7 @@ const App: React.FC = () => {
   const [theme, setTheme] = useState('light');
   const [view, setView] = useState<AppView>('home');
   const [user, setUser] = useState<User | null>(null);
-  const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+  const [isReady, setIsReady] = useState(false);
   
   const [selectedListing, setSelectedListing] = useState<Listing | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
@@ -52,7 +52,6 @@ const App: React.FC = () => {
   const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // CRITICAL: Prevent multiple push registration attempts which causes native crashes
   const pushInitRef = useRef(false);
 
   const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
@@ -74,55 +73,46 @@ const App: React.FC = () => {
     window.scrollTo(0, 0);
   }, []);
 
-  // --- STABLE PUSH NOTIFICATION SEQUENCE ---
+  // --- SAFE PUSH NOTIFICATION SEQUENCE ---
   useEffect(() => {
-    // Requirements: Native, Firebase Authenticated, Ready state, and Not yet initialized this session
-    if (!Capacitor.isNativePlatform() || !user?.id || !isFirebaseReady || pushInitRef.current) return;
+    // Only attempt push if: Native Platform, User Logged In, and System Ready
+    if (!Capacitor.isNativePlatform() || !user?.id || !isReady || pushInitRef.current) return;
 
     const setupPush = async () => {
       try {
         pushInitRef.current = true;
-        console.log("Setting up Push Notifications...");
+        console.log("Initializing Push Service...");
 
-        // 1. Request Permission
-        const permStatus = await PushNotifications.checkPermissions();
-        let status = permStatus.receive;
-        
-        if (status !== 'granted') {
-          const regRequest = await PushNotifications.requestPermissions();
-          status = regRequest.receive;
-        }
-
-        if (status === 'granted') {
-          // 2. Add Listeners first
-          await PushNotifications.addListener('registration', async (token) => {
-            console.log("Push Token received:", token.value);
-            if (db && user?.id) {
-              try {
-                // Merge token into user profile
-                await setDoc(doc(db, 'users', user.id), { fcmToken: token.value }, { merge: true });
-              } catch (e) { console.error("Firestore Token Update Error", e); }
+        // 1. Add listeners FIRST before requesting permission or registering
+        await PushNotifications.addListener('registration', async (token) => {
+            console.log("FCM Token Generated:", token.value);
+            if (db && auth.currentUser) {
+                try {
+                    await setDoc(doc(db, 'users', auth.currentUser.uid), { fcmToken: token.value }, { merge: true });
+                } catch (err) { console.error("Could not save token to Firestore", err); }
             }
-          });
+        });
 
-          await PushNotifications.addListener('registrationError', (error) => {
-            console.error("Push Registration Error:", error.error);
-          });
+        await PushNotifications.addListener('registrationError', (err) => {
+            console.error("Push Registration Error:", err.error);
+        });
 
-          await PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
-             const data = notification.notification.data;
-             if (data?.view) {
-                handleNavigate(data.view as AppView, data.payload || {});
-             }
-          });
+        await PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
+            const data = notification.notification.data;
+            if (data?.view) handleNavigate(data.view as AppView, data.payload || {});
+        });
 
-          // 3. Register after a small delay to ensure the native bridge is idle
-          setTimeout(async () => {
-            await PushNotifications.register().catch(e => console.error("Native Register Call Failed", e));
-          }, 3000);
+        // 2. Request Permissions
+        const permStatus = await PushNotifications.requestPermissions();
+        
+        if (permStatus.receive === 'granted') {
+            // 3. Register (with a safe delay to avoid bridge collision)
+            setTimeout(() => {
+                PushNotifications.register().catch(e => console.error("Native Register Error", e));
+            }, 5000);
         }
       } catch (err) {
-        console.error("Total Push Sequence Failure:", err);
+        console.error("Critical Push Setup Failure:", err);
         pushInitRef.current = false;
       }
     };
@@ -130,40 +120,41 @@ const App: React.FC = () => {
     setupPush();
 
     return () => {
-       // Cleanup listeners on unmount
-       if (Capacitor.isNativePlatform()) {
-           PushNotifications.removeAllListeners();
-       }
+        if (Capacitor.isNativePlatform()) {
+            PushNotifications.removeAllListeners();
+        }
     };
-  }, [user?.id, isFirebaseReady, handleNavigate]);
+  }, [user?.id, isReady, handleNavigate]);
 
   useEffect(() => {
     if (!auth) return;
     let userUnsubscribe: Unsubscribe | null = null;
 
     const authUnsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser && firebaseUser.emailVerified) {
-        if (db) {
-            try {
-                userUnsubscribe = onSnapshot(doc(db, "users", firebaseUser.uid), async (docSnap) => {
-                    if (docSnap.exists()) {
-                         const userData = docSnap.data() as User;
-                         setUser({ id: firebaseUser.uid, ...userData });
-                         setIsFirebaseReady(true);
-                    } else {
-                         // Create initial profile if missing
-                         setIsFirebaseReady(true);
-                    }
-                }, (err) => {
-                    console.error("Auth snapshot error", err);
-                    setIsFirebaseReady(true);
-                });
-            } catch (e) { setIsFirebaseReady(true); }
-        }
+      if (firebaseUser) {
+          // If not verified, we don't block the ready state, but we don't set the user
+          if (firebaseUser.emailVerified) {
+              if (db) {
+                  try {
+                      userUnsubscribe = onSnapshot(doc(db, "users", firebaseUser.uid), (docSnap) => {
+                          if (docSnap.exists()) {
+                              setUser({ id: firebaseUser.uid, ...docSnap.data() } as User);
+                          }
+                          setIsReady(true);
+                      }, (err) => {
+                          console.error("Snapshot error:", err);
+                          setIsReady(true);
+                      });
+                  } catch (e) { setIsReady(true); }
+              } else { setIsReady(true); }
+          } else {
+              setUser(null);
+              setIsReady(true);
+          }
       } else {
-        if (userUnsubscribe) { userUnsubscribe(); userUnsubscribe = null; }
-        setUser(null);
-        setIsFirebaseReady(true);
+          if (userUnsubscribe) { userUnsubscribe(); userUnsubscribe = null; }
+          setUser(null);
+          setIsReady(true);
       }
     });
 
@@ -181,6 +172,8 @@ const App: React.FC = () => {
           setListingsDB(items);
           setLastListingDoc(snapshot.docs[snapshot.docs.length - 1] || null);
           setHasMoreListings(snapshot.docs.length >= 20);
+      }, (err) => {
+          console.error("Listings fetch error:", err);
       });
       return () => unsubscribe();
   }, []);
@@ -195,9 +188,8 @@ const App: React.FC = () => {
           setHasMoreListings(snapshot.docs.length >= 20);
           setLastListingDoc(snapshot.docs[snapshot.docs.length - 1] || null);
           setListingsDB(prev => [...prev, ...newItems]);
-      } finally {
-          setLoadingData(false);
-      }
+      } catch(e) { console.error(e); }
+      finally { setLoadingData(false); }
   };
 
   useEffect(() => {
@@ -238,15 +230,13 @@ const App: React.FC = () => {
     } catch (error: any) { return { success: false, message: error.message }; }
   };
 
-  // Splash screen while Firebase/Auth is stabilizing
-  if (!isFirebaseReady) {
+  if (!isReady) {
       return (
           <div className="flex h-screen items-center justify-center bg-primary">
-              <div className="text-center animate-pulse">
-                  <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-                      <span className="text-primary font-black text-2xl">RD</span>
-                  </div>
+              <div className="text-center">
+                  <div className="animate-spin rounded-full h-12 w-12 border-4 border-white border-t-transparent mb-4 mx-auto"></div>
                   <h1 className="text-white font-bold text-xl tracking-widest">RIZQ DAAN</h1>
+                  <p className="text-white/60 text-xs mt-2">Connecting to Services...</p>
               </div>
           </div>
       );
