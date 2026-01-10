@@ -35,20 +35,40 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ user, onNavigate, currentTh
   };
 
   const sendTestNotification = async () => {
-      if (!db || !user.id) return;
+      if (!user.id) return;
       setTestingNotif(true);
-      try {
-          await addDoc(collection(db, 'notifications'), {
-              userId: user.id,
-              title: "Test Alert! 🚀",
-              message: "Mubarak ho! Aapka notification system bilkul sahi kaam kar raha hai.",
-              type: 'success',
-              isRead: false,
-              createdAt: new Date().toISOString()
+      
+      const title = "Test Alert! 🚀";
+      const message = "Mubarak ho! Aapka notification tray system bilkul sahi kaam kar raha hai.";
+
+      // 1. Trigger Native Status Bar Notification
+      if ('Notification' in window && Notification.permission === 'granted') {
+          navigator.serviceWorker.ready.then((registration) => {
+              // Fix: Type assertion to 'any' to bypass TS errors for potentially missing 'vibrate' or 'badge' in NotificationOptions
+              registration.showNotification(title, {
+                  body: message,
+                  icon: '/icon.png',
+                  vibrate: [100, 50, 100],
+                  badge: '/favicon.ico'
+              } as any);
           });
-      } finally {
-          setTimeout(() => setTestingNotif(false), 2000);
       }
+
+      // 2. Log to Firestore for history
+      if (db) {
+          try {
+              await addDoc(collection(db, 'notifications'), {
+                  userId: user.id,
+                  title: title,
+                  message: message,
+                  type: 'success',
+                  isRead: false,
+                  createdAt: new Date().toISOString()
+              });
+          } catch(e) {}
+      }
+      
+      setTimeout(() => setTestingNotif(false), 1500);
   };
 
   const handleDeleteAccount = async () => {
