@@ -51,13 +51,11 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
 
-  // --- 🔄 NAVIGATION ENGINE WITH HARDWARE BACK BUTTON FIX ---
-  
-  // Is Ref se hum track karenge ke navigation "back" ho rahi hai ya "forward"
-  const isInternalNav = useRef(false);
+  // --- 🔄 ROBUST NAVIGATION ENGINE (Hash Based) ---
 
-  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload, shouldPushState = true) => {
-    // UI state update logic
+  // Is function se hum payload ko history state mein save karte hain
+  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload, shouldPush = true) => {
+    // 1. Internal Logic (State Updates)
     if (newView !== 'details' && newView !== 'subcategories') {
       setSelectedListing(null); setSelectedCategory(null);
     }
@@ -74,37 +72,44 @@ const App: React.FC = () => {
     else if (newView === 'promote-business') { setInitialVendorTab('promotions'); setView('vendor-dashboard'); }
     else setView(newView);
 
-    // Browser history push
-    if (shouldPushState) {
-        window.history.pushState({ view: newView, payload }, '', '#' + newView);
+    // 2. Browser History Sync
+    if (shouldPush) {
+        // Hash update karein takay hardware back button browser ko pichle record pe le jaye
+        const state = { view: newView, payload };
+        window.history.pushState(state, '', `#${newView}`);
     }
 
     window.scrollTo(0, 0);
   }, []);
 
-  // Back Button Listener (Mobile hardware or browser back)
+  // Listen for the Browser Back/Forward buttons
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
         if (event.state && event.state.view) {
-            // Agar history mein koi state hai, toh wahan jao
+            // Agar history mein koi view hai, toh bina pushState kiye wahan jao
             handleNavigate(event.state.view, event.state.payload, false);
         } else {
-            // Agar history khatam ho gayi (Root pe aa gaye), toh home par jao
-            if (view !== 'home') {
-                handleNavigate('home', {}, false);
-            }
+            // Root state (Initial load state)
+            handleNavigate('home', {}, false);
         }
     };
 
     window.addEventListener('popstate', onPopState);
 
-    // Initial setup: Jab app pehli baar khule, ek base entry daal dein
+    // Jab app pehli baar khule, Home state history mein daal dein
     if (!window.history.state) {
-        window.history.replaceState({ view: 'home' }, '', '');
+        window.history.replaceState({ view: 'home' }, '', '#home');
+    } else {
+        // Agar refresh kiya hai aur koi hash hai, toh wahan navigate karein
+        const hashView = window.location.hash.replace('#', '') as AppView;
+        if (hashView && hashView !== 'home') {
+             // Hum history.state se data restore kar sakte hain agar browser ne save kiya ho
+             handleNavigate(hashView, window.history.state.payload, false);
+        }
     }
 
     return () => window.removeEventListener('popstate', onPopState);
-  }, [handleNavigate, view]);
+  }, [handleNavigate]);
 
   // --- 🔔 NOTIFICATIONS & FIREBASE ---
   const triggerNativeNotification = (title: string, body: string) => {
@@ -341,3 +346,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+44
