@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, Unsubscribe, sendEmailVerification } from 'firebase/auth';
 import { doc, setDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData, where } from 'firebase/firestore';
 import { getToken, onMessage } from 'firebase/messaging';
@@ -51,7 +51,62 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
 
-  // --- 🔔 NATIVE SYSTEM NOTIFICATION TRIGGER ---
+  // --- 🔄 NAVIGATION ENGINE WITH HARDWARE BACK BUTTON FIX ---
+  
+  // Is Ref se hum track karenge ke navigation "back" ho rahi hai ya "forward"
+  const isInternalNav = useRef(false);
+
+  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload, shouldPushState = true) => {
+    // UI state update logic
+    if (newView !== 'details' && newView !== 'subcategories') {
+      setSelectedListing(null); setSelectedCategory(null);
+    }
+    if (newView !== 'listings' && newView !== 'details') setSearchQuery('');
+    if (payload?.listing && newView === 'details') setSelectedListing(payload.listing);
+    if (payload?.category && newView === 'subcategories') setSelectedCategory(payload.category);
+    if (payload?.query !== undefined && newView === 'listings') setSearchQuery(payload.query);
+    if (payload?.targetUser && newView === 'chats') setChatTargetUser(payload.targetUser);
+    if (payload?.targetVendorId && newView === 'vendor-profile') setSelectedVendorId(payload.targetVendorId);
+
+    if (newView === 'add-listing') { setInitialVendorTab('add-listing'); setView('vendor-dashboard'); }
+    else if (newView === 'my-ads') { setInitialVendorTab('my-listings'); setView('vendor-dashboard'); }
+    else if (newView === 'vendor-analytics') { setInitialVendorTab('dashboard'); setView('vendor-dashboard'); }
+    else if (newView === 'promote-business') { setInitialVendorTab('promotions'); setView('vendor-dashboard'); }
+    else setView(newView);
+
+    // Browser history push
+    if (shouldPushState) {
+        window.history.pushState({ view: newView, payload }, '', '#' + newView);
+    }
+
+    window.scrollTo(0, 0);
+  }, []);
+
+  // Back Button Listener (Mobile hardware or browser back)
+  useEffect(() => {
+    const onPopState = (event: PopStateEvent) => {
+        if (event.state && event.state.view) {
+            // Agar history mein koi state hai, toh wahan jao
+            handleNavigate(event.state.view, event.state.payload, false);
+        } else {
+            // Agar history khatam ho gayi (Root pe aa gaye), toh home par jao
+            if (view !== 'home') {
+                handleNavigate('home', {}, false);
+            }
+        }
+    };
+
+    window.addEventListener('popstate', onPopState);
+
+    // Initial setup: Jab app pehli baar khule, ek base entry daal dein
+    if (!window.history.state) {
+        window.history.replaceState({ view: 'home' }, '', '');
+    }
+
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [handleNavigate, view]);
+
+  // --- 🔔 NOTIFICATIONS & FIREBASE ---
   const triggerNativeNotification = (title: string, body: string) => {
       if (!('Notification' in window) || Notification.permission !== 'granted') return;
       navigator.serviceWorker.ready.then((registration) => {
@@ -66,57 +121,6 @@ const App: React.FC = () => {
           } as any);
       });
   };
-
-  // --- 🔄 NAVIGATION ENGINE WITH BACK BUTTON SUPPORT ---
-  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload, shouldPushState = true) => {
-    // 1. Logic to set internal state based on payload
-    if (newView !== 'details' && newView !== 'subcategories') {
-      setSelectedListing(null); setSelectedCategory(null);
-    }
-    if (newView !== 'listings' && newView !== 'details') setSearchQuery('');
-    if (payload?.listing && newView === 'details') setSelectedListing(payload.listing);
-    if (payload?.category && newView === 'subcategories') setSelectedCategory(payload.category);
-    if (payload?.query !== undefined && newView === 'listings') setSearchQuery(payload.query);
-    if (payload?.targetUser && newView === 'chats') setChatTargetUser(payload.targetUser);
-    if (payload?.targetVendorId && newView === 'vendor-profile') setSelectedVendorId(payload.targetVendorId);
-
-    // 2. Special Vendor Dashboard logic
-    if (newView === 'add-listing') { setInitialVendorTab('add-listing'); setView('vendor-dashboard'); }
-    else if (newView === 'my-ads') { setInitialVendorTab('my-listings'); setView('vendor-dashboard'); }
-    else if (newView === 'vendor-analytics') { setInitialVendorTab('dashboard'); setView('vendor-dashboard'); }
-    else if (newView === 'promote-business') { setInitialVendorTab('promotions'); setView('vendor-dashboard'); }
-    else setView(newView);
-
-    // 3. Push to Browser History so Back button works
-    if (shouldPushState) {
-        window.history.pushState({ view: newView, payload }, '', '#' + newView);
-    }
-
-    window.scrollTo(0, 0);
-  }, []);
-
-  // Back Button Listener
-  useEffect(() => {
-    const handlePopState = (event: PopStateEvent) => {
-        const state = event.state;
-        if (state && state.view) {
-            // Navigate to the state stored in history, but don't push a new history entry
-            handleNavigate(state.view, state.payload, false);
-        } else {
-            // Default to home if no state
-            handleNavigate('home', {}, false);
-        }
-    };
-
-    window.addEventListener('popstate', handlePopState);
-    
-    // Set initial state for the first load
-    if (!window.history.state) {
-        window.history.replaceState({ view: 'home' }, '', '');
-    }
-
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, [handleNavigate]);
 
   const requestPushPermission = async () => {
       if (!('Notification' in window) || !messaging || !user?.id || !db) {
