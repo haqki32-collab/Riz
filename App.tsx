@@ -49,42 +49,87 @@ const App: React.FC = () => {
   const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
   const [chatTargetUser, setChatTargetUser] = useState<{id: string, name: string} | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
 
-  // --- 🔔 NATIVE SYSTEM NOTIFICATION TRIGGER (With Sound & Vibration) ---
+  // --- 🔔 NATIVE SYSTEM NOTIFICATION TRIGGER ---
   const triggerNativeNotification = (title: string, body: string) => {
       if (!('Notification' in window) || Notification.permission !== 'granted') return;
-
-      // Service worker ke zariye system top bar mein notification bhejna
       navigator.serviceWorker.ready.then((registration) => {
           registration.showNotification(title, {
               body: body,
               icon: '/icon.png',
               badge: '/favicon.ico',
               tag: 'rizqdaan-alert',
-              renotify: true, // Buzzes mobile again
-              vibrate: [200, 100, 200], // Sound trigger pattern on most phones
-              silent: false, // Explicitly false for sound
+              renotify: true,
+              vibrate: [200, 100, 200],
+              silent: false,
           } as any);
       });
   };
+
+  // --- 🔄 NAVIGATION ENGINE WITH BACK BUTTON SUPPORT ---
+  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload, shouldPushState = true) => {
+    // 1. Logic to set internal state based on payload
+    if (newView !== 'details' && newView !== 'subcategories') {
+      setSelectedListing(null); setSelectedCategory(null);
+    }
+    if (newView !== 'listings' && newView !== 'details') setSearchQuery('');
+    if (payload?.listing && newView === 'details') setSelectedListing(payload.listing);
+    if (payload?.category && newView === 'subcategories') setSelectedCategory(payload.category);
+    if (payload?.query !== undefined && newView === 'listings') setSearchQuery(payload.query);
+    if (payload?.targetUser && newView === 'chats') setChatTargetUser(payload.targetUser);
+    if (payload?.targetVendorId && newView === 'vendor-profile') setSelectedVendorId(payload.targetVendorId);
+
+    // 2. Special Vendor Dashboard logic
+    if (newView === 'add-listing') { setInitialVendorTab('add-listing'); setView('vendor-dashboard'); }
+    else if (newView === 'my-ads') { setInitialVendorTab('my-listings'); setView('vendor-dashboard'); }
+    else if (newView === 'vendor-analytics') { setInitialVendorTab('dashboard'); setView('vendor-dashboard'); }
+    else if (newView === 'promote-business') { setInitialVendorTab('promotions'); setView('vendor-dashboard'); }
+    else setView(newView);
+
+    // 3. Push to Browser History so Back button works
+    if (shouldPushState) {
+        window.history.pushState({ view: newView, payload }, '', '#' + newView);
+    }
+
+    window.scrollTo(0, 0);
+  }, []);
+
+  // Back Button Listener
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+        const state = event.state;
+        if (state && state.view) {
+            // Navigate to the state stored in history, but don't push a new history entry
+            handleNavigate(state.view, state.payload, false);
+        } else {
+            // Default to home if no state
+            handleNavigate('home', {}, false);
+        }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    
+    // Set initial state for the first load
+    if (!window.history.state) {
+        window.history.replaceState({ view: 'home' }, '', '');
+    }
+
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [handleNavigate]);
 
   const requestPushPermission = async () => {
       if (!('Notification' in window) || !messaging || !user?.id || !db) {
           setShowPermissionBanner(false);
           return;
       }
-
       try {
           const permission = await Notification.requestPermission();
           if (permission === 'granted') {
               const vapidKey = 'BAw_pNvmzPURAsecjQH0V3aPbVQ-PmvrZiui2YhyWOwYGb71ycnVejhE-O7qMOZ84oCa6uL-IcBwoyRgEENirlw';
               const token = await getToken(messaging, { vapidKey });
               if (token) {
-                  await setDoc(doc(db, 'users', user.id), { 
-                      fcmToken: token,
-                      notificationsEnabled: true 
-                  }, { merge: true });
-                  
+                  await setDoc(doc(db, 'users', user.id), { fcmToken: token, notificationsEnabled: true }, { merge: true });
                   triggerNativeNotification("RizqDaan alerts active! 🔊", "Mubarak ho! Ab aapko sound aur top bar alerts milenge.");
                   setShowPermissionBanner(false);
               }
@@ -92,7 +137,6 @@ const App: React.FC = () => {
               setShowPermissionBanner(false);
           }
       } catch (e) {
-          console.error("Messaging setup error:", e);
           setShowPermissionBanner(false);
       }
   };
@@ -102,16 +146,11 @@ const App: React.FC = () => {
         if (Notification.permission === 'default') {
             setShowPermissionBanner(true);
         }
-        
         try {
             const unsubscribeOnMessage = onMessage(messaging, (payload) => {
                 const title = payload.notification?.title || "RizqDaan Update";
                 const body = payload.notification?.body || "Check your app for details.";
-                
-                // 1. Show in Status Bar (Mobile Drawer) with Sound/Vibration
                 triggerNativeNotification(title, body);
-
-                // 2. Internal UI Toast
                 setActiveToast({
                     id: Date.now().toString(),
                     userId: user.id,
@@ -124,37 +163,13 @@ const App: React.FC = () => {
                 setTimeout(() => setActiveToast(null), 6000);
             });
             return () => unsubscribeOnMessage();
-        } catch (e) {
-            console.error("onMessage error:", e);
-        }
+        } catch (e) {}
     }
   }, [user]);
-
-  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
-    if (newView !== 'details' && newView !== 'subcategories') {
-      setSelectedListing(null); setSelectedCategory(null);
-    }
-    if (newView !== 'listings' && newView !== 'details') setSearchQuery('');
-    if (payload?.listing && newView === 'details') setSelectedListing(payload.listing);
-    if (payload?.category && newView === 'subcategories') setSelectedCategory(payload.category);
-    if (payload?.query !== undefined && newView === 'listings') setSearchQuery(payload.query);
-    if (payload?.targetUser && newView === 'chats') setChatTargetUser(payload.targetUser);
-    if (payload?.targetVendorId && newView === 'vendor-profile') setSelectedVendorId(payload.targetVendorId);
-
-    if (newView === 'add-listing') { setInitialVendorTab('add-listing'); setView('vendor-dashboard'); }
-    else if (newView === 'my-ads') { setInitialVendorTab('my-listings'); setView('vendor-dashboard'); }
-    else if (newView === 'vendor-analytics') { setInitialVendorTab('dashboard'); setView('vendor-dashboard'); }
-    else if (newView === 'promote-business') { setInitialVendorTab('promotions'); setView('vendor-dashboard'); }
-    else setView(newView);
-    window.scrollTo(0, 0);
-  }, []);
-
-  const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
 
   useEffect(() => {
     if (!auth) { setIsReady(true); return; }
     const timeout = setTimeout(() => { if (!isReady) setIsReady(true); }, 6000);
-    
     let userUnsubscribe: Unsubscribe | null = null;
     const authUnsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       try {
@@ -166,9 +181,7 @@ const App: React.FC = () => {
                       }
                       clearTimeout(timeout);
                       setIsReady(true);
-                  }, (err) => { 
-                      setIsReady(true); 
-                  });
+                  }, (err) => { setIsReady(true); });
               } else { setIsReady(true); }
           } else {
               if (userUnsubscribe) userUnsubscribe();
@@ -176,9 +189,7 @@ const App: React.FC = () => {
               clearTimeout(timeout);
               setIsReady(true);
           }
-      } catch (e) {
-          setIsReady(true);
-      }
+      } catch (e) { setIsReady(true); }
     });
     return () => { authUnsubscribe(); if (userUnsubscribe) userUnsubscribe(); clearTimeout(timeout); };
   }, []);
@@ -205,7 +216,7 @@ const App: React.FC = () => {
           setHasMoreListings(snapshot.docs.length >= 20);
           setLastListingDoc(snapshot.docs[snapshot.docs.length - 1] || null);
           setListingsDB(prev => [...prev, ...newItems]);
-      } catch(e) { console.error(e); }
+      } catch(e) {}
       finally { setLoadingData(false); }
   };
 
@@ -218,7 +229,7 @@ const App: React.FC = () => {
     try {
         if (email === 'admin@rizqdaan.com' && password === 'admin') {
             const adminUser: User = { id: 'admin-demo', name: 'Admin', email: 'admin@rizqdaan.com', phone: '0000', shopName: 'Admin HQ', shopAddress: 'Cloud', isVerified: true, isAdmin: true };
-            setUser(adminUser); setView('admin'); return { success: true, message: 'Logged in as Demo Admin' };
+            setUser(adminUser); handleNavigate('admin'); return { success: true, message: 'Logged in as Demo Admin' };
         }
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
         if (!userCredential.user.emailVerified) {
@@ -260,26 +271,26 @@ const App: React.FC = () => {
 
   const renderView = () => {
     switch (view) {
-      case 'home': return <HomePage listings={listingsDB} categories={categories} onNavigate={handleNavigate} onSaveSearch={() => {}} />;
+      case 'home': return <HomePage listings={listingsDB} categories={categories} onNavigate={handleNavigate as any} onSaveSearch={() => {}} />;
       case 'listings': return <ListingsPage listings={listingsDB} onNavigate={(v, p) => handleNavigate('details', p)} initialSearchTerm={searchQuery} loadMore={fetchMoreListings} hasMore={hasMoreListings} isLoading={loadingData} />;
       case 'details': return selectedListing ? <ListingDetailsPage listing={selectedListing} listings={listingsDB} user={user} onNavigate={handleNavigate as any} /> : null;
-      case 'vendor-dashboard': return <VendorDashboard initialTab={initialVendorTab} listings={listingsDB} user={user} onNavigate={handleNavigate} />;
-      case 'vendor-profile': return selectedVendorId ? <VendorProfilePage vendorId={selectedVendorId} currentUser={user} listings={listingsDB} onNavigate={handleNavigate} /> : null;
-      case 'auth': return <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={() => setView('auth')} />;
-      case 'account': return user ? <AccountPage user={user} listings={listingsDB} onLogout={() => { signOut(auth); setUser(null); setView('home'); }} onNavigate={handleNavigate as any} /> : <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={() => setView('auth')} />;
-      case 'subcategories': return selectedCategory ? <SubCategoryPage category={selectedCategory} onNavigate={() => setView('home')} onListingNavigate={(v, q) => handleNavigate(v, { query: q })} /> : null;
-      case 'chats': return user ? <ChatPage currentUser={user} targetUser={chatTargetUser} onNavigate={() => setView('home')} /> : null;
+      case 'vendor-dashboard': return <VendorDashboard initialTab={initialVendorTab} listings={listingsDB} user={user} onNavigate={handleNavigate as any} />;
+      case 'vendor-profile': return selectedVendorId ? <VendorProfilePage vendorId={selectedVendorId} currentUser={user} listings={listingsDB} onNavigate={handleNavigate as any} /> : null;
+      case 'auth': return <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={() => handleNavigate('auth')} />;
+      case 'account': return user ? <AccountPage user={user} listings={listingsDB} onLogout={() => { signOut(auth); setUser(null); handleNavigate('home'); }} onNavigate={handleNavigate as any} /> : <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={() => handleNavigate('auth')} />;
+      case 'subcategories': return selectedCategory ? <SubCategoryPage category={selectedCategory} onNavigate={() => handleNavigate('home')} onListingNavigate={(v, q) => handleNavigate(v as any, { query: q })} /> : null;
+      case 'chats': return user ? <ChatPage currentUser={user} targetUser={chatTargetUser} onNavigate={() => handleNavigate('home')} /> : null;
       case 'favorites': return user ? <FavoritesPage user={user} listings={listingsDB} onNavigate={handleNavigate as any} /> : null;
       case 'saved-searches': return user ? <SavedSearchesPage searches={user.savedSearches || []} onNavigate={handleNavigate as any} /> : null;
-      case 'edit-profile': return user ? <EditProfilePage user={user} onNavigate={handleNavigate} /> : null;
-      case 'settings': return user ? <SettingsPage user={user} onNavigate={handleNavigate} currentTheme={theme} toggleTheme={() => setTheme(t => t === 'light' ? 'dark' : 'light')} onLogout={() => { signOut(auth); setUser(null); setView('home'); }} /> : null;
-      case 'admin': return user?.isAdmin ? <AdminPanel users={[]} listings={listingsDB} onUpdateUserVerification={() => {}} onDeleteListing={() => {}} onImpersonate={(u) => { setUser(u); setView('vendor-dashboard'); }} onNavigate={handleNavigate} /> : null;
-      case 'add-balance': return user ? <AddFundsPage user={user} onNavigate={() => setView('account')} /> : null;
-      case 'referrals': return user ? <ReferralPage user={user} onNavigate={() => setView('account')} /> : null;
-      case 'wallet-history': return user ? <WalletHistoryPage user={user} onNavigate={() => setView('account')} /> : null;
-      case 'notifications': return user ? <NotificationsPage user={user} onNavigate={handleNavigate} /> : null;
-      case 'help-center': return <HelpCenterPage onNavigate={() => setView('account')} />;
-      default: return <HomePage listings={listingsDB} categories={categories} onNavigate={handleNavigate} onSaveSearch={() => {}} />;
+      case 'edit-profile': return user ? <EditProfilePage user={user} onNavigate={handleNavigate as any} /> : null;
+      case 'settings': return user ? <SettingsPage user={user} onNavigate={handleNavigate as any} currentTheme={theme} toggleTheme={() => setTheme(t => t === 'light' ? 'dark' : 'light')} onLogout={() => { signOut(auth); setUser(null); handleNavigate('home'); }} /> : null;
+      case 'admin': return user?.isAdmin ? <AdminPanel users={[]} listings={listingsDB} onUpdateUserVerification={() => {}} onDeleteListing={() => {}} onImpersonate={(u) => { setUser(u); handleNavigate('vendor-dashboard'); }} onNavigate={handleNavigate as any} /> : null;
+      case 'add-balance': return user ? <AddFundsPage user={user} onNavigate={() => handleNavigate('account')} /> : null;
+      case 'referrals': return user ? <ReferralPage user={user} onNavigate={() => handleNavigate('account')} /> : null;
+      case 'wallet-history': return user ? <WalletHistoryPage user={user} onNavigate={() => handleNavigate('account')} /> : null;
+      case 'notifications': return user ? <NotificationsPage user={user} onNavigate={handleNavigate as any} /> : null;
+      case 'help-center': return <HelpCenterPage onNavigate={() => handleNavigate('account')} />;
+      default: return <HomePage listings={listingsDB} categories={categories} onNavigate={handleNavigate as any} onSaveSearch={() => {}} />;
     }
   };
 
