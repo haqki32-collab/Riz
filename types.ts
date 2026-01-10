@@ -189,7 +189,7 @@ export interface User {
   };
   memberSince?: string;
   adminNotes?: string; 
-  fcmToken?: string;
+  fcmToken?: string; // New field for push notifications
   wallet?: {
     balance: number;
     totalSpend: number;
