@@ -3,7 +3,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, Unsubscribe, sendEmailVerification } from 'firebase/auth';
 import { doc, setDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
-import { PushNotifications } from '@capacitor/push-notifications';
 import { Capacitor } from '@capacitor/core';
 
 import Header from './components/common/Header';
@@ -52,8 +51,6 @@ const App: React.FC = () => {
   const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const pushInitRef = useRef(false);
-
   const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
     if (newView !== 'details' && newView !== 'subcategories') {
       setSelectedListing(null); setSelectedCategory(null);
@@ -73,58 +70,20 @@ const App: React.FC = () => {
     window.scrollTo(0, 0);
   }, []);
 
-  // --- SAFE PUSH NOTIFICATION SEQUENCE ---
+  // Sync Cached Push Token when internet is definitely stable
   useEffect(() => {
-    // Only attempt push if: Native Platform, User Logged In, and System Ready
-    if (!Capacitor.isNativePlatform() || !user?.id || !isReady || pushInitRef.current) return;
-
-    const setupPush = async () => {
-      try {
-        pushInitRef.current = true;
-        console.log("Initializing Push Service...");
-
-        // 1. Add listeners FIRST before requesting permission or registering
-        await PushNotifications.addListener('registration', async (token) => {
-            console.log("FCM Token Generated:", token.value);
-            if (db && auth.currentUser) {
-                try {
-                    await setDoc(doc(db, 'users', auth.currentUser.uid), { fcmToken: token.value }, { merge: true });
-                } catch (err) { console.error("Could not save token to Firestore", err); }
-            }
-        });
-
-        await PushNotifications.addListener('registrationError', (err) => {
-            console.error("Push Registration Error:", err.error);
-        });
-
-        await PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
-            const data = notification.notification.data;
-            if (data?.view) handleNavigate(data.view as AppView, data.payload || {});
-        });
-
-        // 2. Request Permissions
-        const permStatus = await PushNotifications.requestPermissions();
+    if (isReady && user?.id && db) {
+        const cachedToken = localStorage.getItem('rizqdaan_fcm_token');
+        const lastSync = localStorage.getItem('rizqdaan_fcm_last_sync');
         
-        if (permStatus.receive === 'granted') {
-            // 3. Register (with a safe delay to avoid bridge collision)
-            setTimeout(() => {
-                PushNotifications.register().catch(e => console.error("Native Register Error", e));
-            }, 5000);
+        if (cachedToken && (!lastSync || Date.now() - parseInt(lastSync) > 86400000)) {
+            console.log("Syncing cached FCM token to Firestore...");
+            setDoc(doc(db, 'users', user.id), { fcmToken: cachedToken }, { merge: true })
+                .then(() => localStorage.setItem('rizqdaan_fcm_last_sync', Date.now().toString()))
+                .catch(() => {});
         }
-      } catch (err) {
-        console.error("Critical Push Setup Failure:", err);
-        pushInitRef.current = false;
-      }
-    };
-
-    setupPush();
-
-    return () => {
-        if (Capacitor.isNativePlatform()) {
-            PushNotifications.removeAllListeners();
-        }
-    };
-  }, [user?.id, isReady, handleNavigate]);
+    }
+  }, [isReady, user?.id]);
 
   useEffect(() => {
     if (!auth) return;
@@ -132,7 +91,6 @@ const App: React.FC = () => {
 
     const authUnsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-          // If not verified, we don't block the ready state, but we don't set the user
           if (firebaseUser.emailVerified) {
               if (db) {
                   try {
