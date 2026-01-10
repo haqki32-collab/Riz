@@ -75,71 +75,58 @@ const App: React.FC = () => {
     window.scrollTo(0, 0);
   }, []);
 
-  // --- FCM PUSH NOTIFICATION SETUP WITH ULTRA-SAFE GUARDS ---
+  // --- FCM PUSH NOTIFICATIONS INITIALIZATION ---
   useEffect(() => {
-    // 1. Guard against non-native or missing user
+    // Only run on actual mobile devices, and only if user is logged in
     if (!Capacitor.isNativePlatform() || !user?.id) return;
-    
-    // 2. Critical: Check if plugin is actually available to prevent crash
-    if (!Capacitor.isPluginAvailable('PushNotifications')) {
-        console.warn("PushNotifications plugin not found on this platform.");
-        return;
-    }
-
-    let isSubscribed = true;
 
     const setupPush = async () => {
-      // 3. Delayed start to let UI settle
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      try {
-        const permission = await PushNotifications.requestPermissions();
-        if (permission.receive === 'granted' && isSubscribed) {
-          
-          await PushNotifications.createChannel({
-            id: 'rizqdaan_notifications',
-            name: 'General',
-            description: 'Important updates',
-            importance: 5,
-            visibility: 1,
-            vibration: true,
-          }).catch(() => {});
+        try {
+            // Request permissions
+            const permission = await PushNotifications.requestPermissions();
+            if (permission.receive === 'granted') {
+                // Register with FCM
+                await PushNotifications.register();
+            }
 
-          await PushNotifications.register().catch(e => console.error("Reg failed", e));
+            // Listen for registration (Device Token)
+            PushNotifications.addListener('registration', async (token) => {
+                if (db && user?.id) {
+                    // Store token in Firestore for targeted notifications
+                    await setDoc(doc(db, 'users', user.id), { fcmToken: token.value }, { merge: true });
+                }
+            });
+
+            // Listen for notification tap (What happens when user clicks the notification)
+            PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
+                const data = notification.notification.data;
+                if (data && data.view) {
+                    handleNavigate(data.view as AppView, data.payload || {});
+                }
+            });
+
+            // Optional: Android channel setup for high priority
+            if (Capacitor.getPlatform() === 'android') {
+                await PushNotifications.createChannel({
+                    id: 'rizqdaan_main',
+                    name: 'Main Notifications',
+                    description: 'Notifications for your account activities',
+                    importance: 5,
+                    visibility: 1,
+                    vibration: true
+                });
+            }
+        } catch (e) {
+            console.warn("Push notifications initialization failed", e);
         }
-
-        // Listeners with internal try-catch
-        PushNotifications.addListener('registration', async (token) => {
-          if (isSubscribed && db && auth.currentUser) {
-            try {
-              await setDoc(doc(db, 'users', auth.currentUser.uid), { fcmToken: token.value }, { merge: true });
-            } catch (err) {}
-          }
-        });
-
-        PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
-          try {
-              const data = notification.notification.data;
-              if (data?.view) {
-                 handleNavigate(data.view as AppView, data.listingId ? { query: data.listingId } : {});
-              }
-          } catch (err) {}
-        });
-
-      } catch (e) {
-        console.error("Native push error caught", e);
-      }
     };
 
     setupPush();
 
     return () => {
-      isSubscribed = false;
-      try {
-          if (Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('PushNotifications')) {
+        if (Capacitor.isNativePlatform()) {
             PushNotifications.removeAllListeners();
-          }
-      } catch (e) {}
+        }
     };
   }, [user?.id, handleNavigate]);
 
