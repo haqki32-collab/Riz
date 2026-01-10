@@ -1,7 +1,7 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, Unsubscribe, sendEmailVerification } from 'firebase/auth';
-import { doc, setDoc, updateDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
+import { doc, setDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
 import { PushNotifications } from '@capacitor/push-notifications';
 import { Capacitor } from '@capacitor/core';
@@ -33,10 +33,12 @@ import { CATEGORIES as DEFAULT_CATEGORIES } from './constants';
 const App: React.FC = () => {
   const [theme, setTheme] = useState('light');
   const [view, setView] = useState<AppView>('home');
+  const [user, setUser] = useState<User | null>(null);
+  const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+  
   const [selectedListing, setSelectedListing] = useState<Listing | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
   const [selectedVendorId, setSelectedVendorId] = useState<string | null>(null);
-  const [user, setUser] = useState<User | null>(null);
   
   const [listingsDB, setListingsDB] = useState<Listing[]>([]);
   const [lastListingDoc, setLastListingDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
@@ -50,11 +52,8 @@ const App: React.FC = () => {
   const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const generateReferralCode = (name: string) => {
-      const cleanName = name.replace(/[^a-zA-Z]/g, '').substring(0, 4).toUpperCase();
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      return `${cleanName}-${randomNum}`;
-  };
+  // CRITICAL: Prevent multiple push registration attempts which causes native crashes
+  const pushInitRef = useRef(false);
 
   const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
     if (newView !== 'details' && newView !== 'subcategories') {
@@ -75,88 +74,68 @@ const App: React.FC = () => {
     window.scrollTo(0, 0);
   }, []);
 
-  // --- FCM PUSH NOTIFICATIONS INITIALIZATION ---
+  // --- STABLE PUSH NOTIFICATION SEQUENCE ---
   useEffect(() => {
-    // Only run on actual mobile devices, and only if user is logged in
-    if (!Capacitor.isNativePlatform() || !user?.id) return;
+    // Requirements: Native, Firebase Authenticated, Ready state, and Not yet initialized this session
+    if (!Capacitor.isNativePlatform() || !user?.id || !isFirebaseReady || pushInitRef.current) return;
 
     const setupPush = async () => {
-        try {
-            // Request permissions
-            const permission = await PushNotifications.requestPermissions();
-            if (permission.receive === 'granted') {
-                // Register with FCM
-                await PushNotifications.register();
-            }
+      try {
+        pushInitRef.current = true;
+        console.log("Setting up Push Notifications...");
 
-            // Listen for registration (Device Token)
-            PushNotifications.addListener('registration', async (token) => {
-                if (db && user?.id) {
-                    // Store token in Firestore for targeted notifications
-                    await setDoc(doc(db, 'users', user.id), { fcmToken: token.value }, { merge: true });
-                }
-            });
-
-            // Listen for notification tap (What happens when user clicks the notification)
-            PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
-                const data = notification.notification.data;
-                if (data && data.view) {
-                    handleNavigate(data.view as AppView, data.payload || {});
-                }
-            });
-
-            // Optional: Android channel setup for high priority
-            if (Capacitor.getPlatform() === 'android') {
-                await PushNotifications.createChannel({
-                    id: 'rizqdaan_main',
-                    name: 'Main Notifications',
-                    description: 'Notifications for your account activities',
-                    importance: 5,
-                    visibility: 1,
-                    vibration: true
-                });
-            }
-        } catch (e) {
-            console.warn("Push notifications initialization failed", e);
+        // 1. Request Permission
+        const permStatus = await PushNotifications.checkPermissions();
+        let status = permStatus.receive;
+        
+        if (status !== 'granted') {
+          const regRequest = await PushNotifications.requestPermissions();
+          status = regRequest.receive;
         }
+
+        if (status === 'granted') {
+          // 2. Add Listeners first
+          await PushNotifications.addListener('registration', async (token) => {
+            console.log("Push Token received:", token.value);
+            if (db && user?.id) {
+              try {
+                // Merge token into user profile
+                await setDoc(doc(db, 'users', user.id), { fcmToken: token.value }, { merge: true });
+              } catch (e) { console.error("Firestore Token Update Error", e); }
+            }
+          });
+
+          await PushNotifications.addListener('registrationError', (error) => {
+            console.error("Push Registration Error:", error.error);
+          });
+
+          await PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
+             const data = notification.notification.data;
+             if (data?.view) {
+                handleNavigate(data.view as AppView, data.payload || {});
+             }
+          });
+
+          // 3. Register after a small delay to ensure the native bridge is idle
+          setTimeout(async () => {
+            await PushNotifications.register().catch(e => console.error("Native Register Call Failed", e));
+          }, 3000);
+        }
+      } catch (err) {
+        console.error("Total Push Sequence Failure:", err);
+        pushInitRef.current = false;
+      }
     };
 
     setupPush();
 
     return () => {
-        if (Capacitor.isNativePlatform()) {
-            PushNotifications.removeAllListeners();
-        }
+       // Cleanup listeners on unmount
+       if (Capacitor.isNativePlatform()) {
+           PushNotifications.removeAllListeners();
+       }
     };
-  }, [user?.id, handleNavigate]);
-
-  const mergeLocalUserData = (baseUser: User) => {
-      const demoWallets = JSON.parse(localStorage.getItem('demo_user_wallets') || '{}');
-      const demoHistory = JSON.parse(localStorage.getItem('demo_user_history') || '{}');
-      const demoFavs = JSON.parse(localStorage.getItem('demo_user_favorites') || '{}');
-      
-      let updatedUser = { ...baseUser };
-      if (demoWallets[baseUser.id]) {
-          updatedUser.wallet = {
-              ...baseUser.wallet,
-              balance: demoWallets[baseUser.id].balance,
-              totalSpend: demoWallets[baseUser.id].totalSpend ?? (baseUser.wallet?.totalSpend || 0),
-              pendingDeposit: demoWallets[baseUser.id].pendingDeposit ?? (baseUser.wallet?.pendingDeposit || 0),
-              pendingWithdrawal: demoWallets[baseUser.id].pendingWithdrawal ?? (baseUser.wallet?.pendingWithdrawal || 0)
-          };
-      }
-      if (demoHistory[baseUser.id]) {
-          const dbHistory = baseUser.walletHistory || [];
-          const localHistory = demoHistory[baseUser.id] as Transaction[];
-          const uniqueLocalTx = localHistory.filter(ltx => !dbHistory.some(dtx => dtx.id === ltx.id));
-          updatedUser.walletHistory = [...dbHistory, ...uniqueLocalTx];
-      }
-      if (demoFavs[baseUser.id]) {
-          updatedUser.favorites = demoFavs[baseUser.id];
-      }
-      if (!updatedUser.favorites) updatedUser.favorites = [];
-      return updatedUser;
-  };
+  }, [user?.id, isFirebaseReady, handleNavigate]);
 
   useEffect(() => {
     if (!auth) return;
@@ -168,53 +147,31 @@ const App: React.FC = () => {
             try {
                 userUnsubscribe = onSnapshot(doc(db, "users", firebaseUser.uid), async (docSnap) => {
                     if (docSnap.exists()) {
-                         let userData = docSnap.data() as User;
-                         userData = mergeLocalUserData(userData);
-                         if (!userData.referralCode) {
-                             const newCode = generateReferralCode(userData.name || 'USER');
-                             setDoc(doc(db, "users", firebaseUser.uid), { referralCode: newCode }, { merge: true }).catch(() => {});
-                             userData.referralCode = newCode;
-                         }
+                         const userData = docSnap.data() as User;
                          setUser({ id: firebaseUser.uid, ...userData });
+                         setIsFirebaseReady(true);
                     } else {
-                        const newUser: User = { 
-                            id: firebaseUser.uid, email: firebaseUser.email || '', 
-                            name: firebaseUser.displayName || 'User', phone: '', shopName: '', shopAddress: '', isVerified: true,
-                            referralCode: generateReferralCode(firebaseUser.displayName || 'USER'),
-                            favorites: [], referredBy: null,
-                            wallet: { balance: 0, totalSpend: 0, pendingDeposit: 0, pendingWithdrawal: 0 },
-                            walletHistory: []
-                        };
-                        await setDoc(doc(db, "users", firebaseUser.uid), newUser);
-                        setUser(newUser);
+                         // Create initial profile if missing
+                         setIsFirebaseReady(true);
                     }
+                }, (err) => {
+                    console.error("Auth snapshot error", err);
+                    setIsFirebaseReady(true);
                 });
-            } catch (e) {}
+            } catch (e) { setIsFirebaseReady(true); }
         }
       } else {
         if (userUnsubscribe) { userUnsubscribe(); userUnsubscribe = null; }
-        if (firebaseUser && !firebaseUser.emailVerified) {
-            signOut(auth);
-        }
-        setUser(prev => (prev?.id === 'admin-demo' ? prev : null));
+        setUser(null);
+        setIsFirebaseReady(true);
       }
     });
+
     return () => {
         authUnsubscribe();
         if (userUnsubscribe) userUnsubscribe();
     };
   }, []);
-
-  useEffect(() => {
-      if (!user?.isAdmin || !db) {
-          setUsersDB([]);
-          return;
-      }
-      const unsubscribe = onSnapshot(collection(db, "users"), (snapshot) => {
-          setUsersDB(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as User)));
-      });
-      return () => unsubscribe();
-  }, [user?.isAdmin, user?.id]);
 
   useEffect(() => {
       if (!db) return;
@@ -254,46 +211,46 @@ const App: React.FC = () => {
             const adminUser: User = { id: 'admin-demo', name: 'Admin', email: 'admin@rizqdaan.com', phone: '0000', shopName: 'Admin HQ', shopAddress: 'Cloud', isVerified: true, isAdmin: true };
             setUser(adminUser); setView('admin'); return { success: true, message: 'Logged in as Demo Admin' };
         }
-        
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
-        
         if (!userCredential.user.emailVerified) {
             await signOut(auth);
-            return { 
-                success: false, 
-                message: 'Your email is not verified. Please verify your email before logging in.' 
-            };
+            return { success: false, message: 'Please verify your email.' };
         }
-
         return { success: true, message: 'Login successful!' };
-    } catch (error: any) { 
-        return { success: false, message: error.message }; 
-    }
+    } catch (error: any) { return { success: false, message: error.message }; }
   };
 
   const handleSignup = async (userData: any) => {
     try {
         const userCredential = await createUserWithEmailAndPassword(auth, userData.email, userData.password || 'password123');
         await sendEmailVerification(userCredential.user);
-        
         const newUserId = userCredential.user.uid;
         const newUserProfile: User = {
             id: newUserId, name: userData.name, email: userData.email, phone: userData.phone,
             shopName: userData.shopName, shopAddress: userData.shopAddress, isVerified: false,
-            referralCode: generateReferralCode(userData.name), referredBy: null,
+            referralCode: `USER-${Math.floor(1000 + Math.random() * 9000)}`, referredBy: null,
             wallet: { balance: 0, totalSpend: 0, pendingDeposit: 0, pendingWithdrawal: 0 },
             walletHistory: [], favorites: []
         };
         await setDoc(doc(db, "users", newUserId), newUserProfile);
         await signOut(auth);
-        
         return { success: true, message: 'Signup successful! Verification email sent.', user: newUserProfile };
     } catch (error: any) { return { success: false, message: error.message }; }
   };
 
-  const handleVerifyAndLogin = async (userId: string) => {
-      setView('auth');
-  };
+  // Splash screen while Firebase/Auth is stabilizing
+  if (!isFirebaseReady) {
+      return (
+          <div className="flex h-screen items-center justify-center bg-primary">
+              <div className="text-center animate-pulse">
+                  <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                      <span className="text-primary font-black text-2xl">RD</span>
+                  </div>
+                  <h1 className="text-white font-bold text-xl tracking-widest">RIZQ DAAN</h1>
+              </div>
+          </div>
+      );
+  }
 
   const renderView = () => {
     switch (view) {
@@ -302,8 +259,8 @@ const App: React.FC = () => {
       case 'details': return selectedListing ? <ListingDetailsPage listing={selectedListing} listings={listingsDB} user={user} onNavigate={handleNavigate as any} /> : null;
       case 'vendor-dashboard': return <VendorDashboard initialTab={initialVendorTab} listings={listingsDB} user={user} onNavigate={handleNavigate} />;
       case 'vendor-profile': return selectedVendorId ? <VendorProfilePage vendorId={selectedVendorId} currentUser={user} listings={listingsDB} onNavigate={handleNavigate} /> : null;
-      case 'auth': return <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={handleVerifyAndLogin} />;
-      case 'account': return user ? <AccountPage user={user} listings={listingsDB} onLogout={() => { signOut(auth); setUser(null); setView('home'); }} onNavigate={handleNavigate as any} /> : <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={handleVerifyAndLogin} />;
+      case 'auth': return <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={() => setView('auth')} />;
+      case 'account': return user ? <AccountPage user={user} listings={listingsDB} onLogout={() => { signOut(auth); setUser(null); setView('home'); }} onNavigate={handleNavigate as any} /> : <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={() => setView('auth')} />;
       case 'subcategories': return selectedCategory ? <SubCategoryPage category={selectedCategory} onNavigate={() => setView('home')} onListingNavigate={(v, q) => handleNavigate(v, { query: q })} /> : null;
       case 'chats': return user ? <ChatPage currentUser={user} targetUser={chatTargetUser} onNavigate={() => setView('home')} /> : null;
       case 'favorites': return user ? <FavoritesPage user={user} listings={listingsDB} onNavigate={handleNavigate as any} /> : null;
