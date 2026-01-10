@@ -50,20 +50,20 @@ const App: React.FC = () => {
   const [chatTargetUser, setChatTargetUser] = useState<{id: string, name: string} | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // --- 🔔 NATIVE SYSTEM NOTIFICATION TRIGGER ---
+  // --- 🔔 NATIVE SYSTEM NOTIFICATION TRIGGER (With Sound & Vibration) ---
   const triggerNativeNotification = (title: string, body: string) => {
       if (!('Notification' in window) || Notification.permission !== 'granted') return;
 
-      // This triggers the Android/System Status Bar notification
+      // Service worker ke zariye system top bar mein notification bhejna
       navigator.serviceWorker.ready.then((registration) => {
-          // Fix: Type assertion to 'any' to bypass TS errors for potentially missing 'renotify' or 'vibrate' in NotificationOptions
           registration.showNotification(title, {
               body: body,
               icon: '/icon.png',
               badge: '/favicon.ico',
               tag: 'rizqdaan-alert',
-              renotify: true,
-              vibrate: [200, 100, 200]
+              renotify: true, // Buzzes mobile again
+              vibrate: [200, 100, 200], // Sound trigger pattern on most phones
+              silent: false, // Explicitly false for sound
           } as any);
       });
   };
@@ -85,8 +85,7 @@ const App: React.FC = () => {
                       notificationsEnabled: true 
                   }, { merge: true });
                   
-                  // Send a system welcome alert
-                  triggerNativeNotification("RizqDaan Alerts Active", "Mubarak ho! Notifications ab aapki status bar mein nazar ayenge.");
+                  triggerNativeNotification("RizqDaan alerts active! 🔊", "Mubarak ho! Ab aapko sound aur top bar alerts milenge.");
                   setShowPermissionBanner(false);
               }
           } else {
@@ -109,10 +108,10 @@ const App: React.FC = () => {
                 const title = payload.notification?.title || "RizqDaan Update";
                 const body = payload.notification?.body || "Check your app for details.";
                 
-                // 1. Show in Status Bar (drawer)
+                // 1. Show in Status Bar (Mobile Drawer) with Sound/Vibration
                 triggerNativeNotification(title, body);
 
-                // 2. Keep the internal UI toast for better UX
+                // 2. Internal UI Toast
                 setActiveToast({
                     id: Date.now().toString(),
                     userId: user.id,
@@ -232,7 +231,7 @@ const App: React.FC = () => {
 
   const handleSignup = async (userData: any) => {
     try {
-        const userCredential = await createUserWithEmailAndPassword(userData.email, userData.password || 'password123');
+        const userCredential = await createUserWithEmailAndPassword(auth, userData.email, userData.password || 'password123');
         await sendEmailVerification(userCredential.user);
         const newUserId = userCredential.user.uid;
         const newUserProfile: User = {
@@ -307,7 +306,7 @@ const App: React.FC = () => {
               <div className="flex items-center justify-between gap-4">
                   <div className="flex-1">
                       <h4 className="font-black text-sm uppercase">Enable Alerts? 🔔</h4>
-                      <p className="text-[10px] opacity-80 mt-1">Receive system alerts in your status bar.</p>
+                      <p className="text-[10px] opacity-80 mt-1">Receive sound alerts in your status bar.</p>
                   </div>
                   <div className="flex gap-2">
                     <button onClick={requestPushPermission} className="px-4 py-2 bg-white text-primary rounded-xl text-xs font-black shadow-lg uppercase active:scale-90 transition-transform">Allow</button>
