@@ -1,8 +1,11 @@
+
 import React, { useState, useEffect } from 'react';
 import { User, AppView, NavigatePayload } from '../../types';
 import { doc, deleteDoc, setDoc } from 'firebase/firestore';
 import { deleteUser } from 'firebase/auth';
 import { db, auth } from '../../firebaseConfig';
+import { PushNotifications } from '@capacitor/push-notifications';
+import { Capacitor } from '@capacitor/core';
 
 interface SettingsPageProps {
   user: User;
@@ -14,23 +17,71 @@ interface SettingsPageProps {
 
 const SettingsPage: React.FC<SettingsPageProps> = ({ user, onNavigate, currentTheme, toggleTheme, onLogout }) => {
   const [notifications, setNotifications] = useState({
-    push: user.notifications?.push ?? true,
+    push: user.notifications?.push ?? false,
     email: user.notifications?.email ?? false,
     sms: user.notifications?.sms ?? true,
   });
 
+  const [pushStatus, setPushStatus] = useState<'none' | 'checking' | 'granted' | 'denied'>('none');
+  const [isActivating, setIsActivating] = useState(false);
+
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+        PushNotifications.checkPermissions().then(res => {
+            setPushStatus(res.receive);
+        });
+    }
+  }, []);
+
+  const handleEnablePush = async () => {
+    if (!Capacitor.isNativePlatform()) {
+        alert("Push notifications are only available on mobile devices.");
+        return;
+    }
+
+    setIsActivating(true);
+    try {
+        // 1. Add listeners FIRST
+        await PushNotifications.removeAllListeners();
+        
+        await PushNotifications.addListener('registration', (token) => {
+            console.log("Push Token Generated:", token.value);
+            localStorage.setItem('rizqdaan_fcm_token', token.value);
+            // We don't write to Firestore here to avoid bridge overload
+        });
+
+        await PushNotifications.addListener('registrationError', (err) => {
+            console.error("Push Error:", err.error);
+        });
+
+        // 2. Request Permission
+        const perm = await PushNotifications.requestPermissions();
+        setPushStatus(perm.receive);
+
+        if (perm.receive === 'granted') {
+            // 3. Register with a massive delay for stability
+            setTimeout(() => {
+                PushNotifications.register();
+                setNotifications(prev => ({ ...prev, push: true }));
+                setIsActivating(false);
+                alert("✅ Notifications Enabled Successfully!");
+            }, 2000);
+        } else {
+            setIsActivating(false);
+            alert("❌ Permission denied. Enable from phone settings.");
+        }
+    } catch (e) {
+        setIsActivating(false);
+        alert("Setup failed. Please restart the app.");
+    }
+  };
+
   useEffect(() => {
       if (db && user.id) {
           const userRef = doc(db, "users", user.id);
-          setDoc(userRef, { notifications }, { merge: true }).catch((e) => {
-              console.warn("Setting save failed: " + (e?.message || String(e)));
-          });
+          setDoc(userRef, { notifications }, { merge: true }).catch(() => {});
       }
   }, [notifications, user.id]);
-
-  const toggleNotification = (type: keyof typeof notifications) => {
-    setNotifications(prev => ({ ...prev, [type]: !prev[type] }));
-  };
 
   const handleDeleteAccount = async () => {
       const confirmation = prompt("Type 'DELETE' to confirm you want to permanently delete your account.");
@@ -41,7 +92,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ user, onNavigate, currentTh
               alert("Account deleted.");
               onLogout();
           } catch (e: any) {
-              console.error("Delete account error: " + (e?.message || String(e)));
               alert("Error deleting account. Please re-login and try again.");
           }
       }
@@ -57,6 +107,35 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ user, onNavigate, currentTh
       </header>
       
       <div className="space-y-6 max-w-lg mx-auto">
+        {/* PUSH NOTIFICATION SECTION - SAFE IMPLEMENTATION */}
+        {Capacitor.isNativePlatform() && (
+            <div className="bg-white dark:bg-dark-surface p-6 rounded-xl shadow-md border-l-4 border-primary">
+                <div className="flex items-center justify-between mb-4">
+                    <div>
+                        <h3 className="text-lg font-bold dark:text-white">Push Notifications</h3>
+                        <p className="text-xs text-gray-500">Get alerts for messages and updates.</p>
+                    </div>
+                    <div className={`p-2 rounded-full ${pushStatus === 'granted' ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-400'}`}>
+                        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
+                    </div>
+                </div>
+
+                {pushStatus === 'granted' ? (
+                    <div className="p-3 bg-green-50 dark:bg-green-900/10 text-green-700 dark:text-green-300 text-xs font-bold rounded-lg text-center">
+                        ✓ Notifications are Active
+                    </div>
+                ) : (
+                    <button 
+                        onClick={handleEnablePush}
+                        disabled={isActivating}
+                        className="w-full py-3 bg-primary text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-3 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        {isActivating ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full"></span> : 'Enable Mobile Notifications'}
+                    </button>
+                )}
+            </div>
+        )}
+
         <div className="bg-white dark:bg-dark-surface p-4 rounded-xl shadow-md">
           <h3 className="px-1 py-2 text-sm font-semibold text-primary uppercase tracking-wider">Appearance</h3>
           <div className="w-full flex items-center justify-between p-3">
