@@ -50,11 +50,26 @@ const App: React.FC = () => {
   const [chatTargetUser, setChatTargetUser] = useState<{id: string, name: string} | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // --- 🔔 SAFE NOTIFICATION PERMISSION HANDLER ---
+  // --- 🔔 NATIVE SYSTEM NOTIFICATION TRIGGER ---
+  const triggerNativeNotification = (title: string, body: string) => {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+      // This triggers the Android/System Status Bar notification
+      navigator.serviceWorker.ready.then((registration) => {
+          // Fix: Type assertion to 'any' to bypass TS errors for potentially missing 'renotify' or 'vibrate' in NotificationOptions
+          registration.showNotification(title, {
+              body: body,
+              icon: '/icon.png',
+              badge: '/favicon.ico',
+              tag: 'rizqdaan-alert',
+              renotify: true,
+              vibrate: [200, 100, 200]
+          } as any);
+      });
+  };
+
   const requestPushPermission = async () => {
-      // Check if browser supports notifications
       if (!('Notification' in window) || !messaging || !user?.id || !db) {
-          console.warn("Notifications not supported or messaging not ready");
           setShowPermissionBanner(false);
           return;
       }
@@ -62,40 +77,47 @@ const App: React.FC = () => {
       try {
           const permission = await Notification.requestPermission();
           if (permission === 'granted') {
-              // REAL PUBLIC VAPID KEY (Dikh rahi hai aapke screenshot ke background mein)
               const vapidKey = 'BAw_pNvmzPURAsecjQH0V3aPbVQ-PmvrZiui2YhyWOwYGb71ycnVejhE-O7qMOZ84oCa6uL-IcBwoyRgEENirlw';
-              
               const token = await getToken(messaging, { vapidKey });
               if (token) {
                   await setDoc(doc(db, 'users', user.id), { 
                       fcmToken: token,
                       notificationsEnabled: true 
                   }, { merge: true });
+                  
+                  // Send a system welcome alert
+                  triggerNativeNotification("RizqDaan Alerts Active", "Mubarak ho! Notifications ab aapki status bar mein nazar ayenge.");
                   setShowPermissionBanner(false);
               }
           } else {
               setShowPermissionBanner(false);
           }
       } catch (e) {
-          console.error("Messaging setup error (Handled):", e);
+          console.error("Messaging setup error:", e);
           setShowPermissionBanner(false);
       }
   };
 
   useEffect(() => {
-    // SAFE INITIALIZATION: Only run if all conditions met and won't crash the app
-    if (user && messaging && typeof window !== 'undefined' && 'Notification' in window) {
+    if (user && messaging && 'Notification' in window) {
         if (Notification.permission === 'default') {
             setShowPermissionBanner(true);
         }
         
         try {
             const unsubscribeOnMessage = onMessage(messaging, (payload) => {
+                const title = payload.notification?.title || "RizqDaan Update";
+                const body = payload.notification?.body || "Check your app for details.";
+                
+                // 1. Show in Status Bar (drawer)
+                triggerNativeNotification(title, body);
+
+                // 2. Keep the internal UI toast for better UX
                 setActiveToast({
                     id: Date.now().toString(),
                     userId: user.id,
-                    title: payload.notification?.title || "Update",
-                    message: payload.notification?.body || "",
+                    title: title,
+                    message: body,
                     type: 'info',
                     isRead: false,
                     createdAt: new Date().toISOString()
@@ -132,7 +154,6 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!auth) { setIsReady(true); return; }
-    // Hard timeout to ensure app never stays stuck on splash
     const timeout = setTimeout(() => { if (!isReady) setIsReady(true); }, 6000);
     
     let userUnsubscribe: Unsubscribe | null = null;
@@ -147,7 +168,6 @@ const App: React.FC = () => {
                       clearTimeout(timeout);
                       setIsReady(true);
                   }, (err) => { 
-                      console.error("User Snapshot Error:", err);
                       setIsReady(true); 
                   });
               } else { setIsReady(true); }
@@ -172,8 +192,6 @@ const App: React.FC = () => {
           setListingsDB(items);
           setLastListingDoc(snapshot.docs[snapshot.docs.length - 1] || null);
           setHasMoreListings(snapshot.docs.length >= 20);
-      }, (err) => {
-          console.error("Listings listener error:", err);
       });
       return () => unsubscribe();
   }, [isReady]);
@@ -214,7 +232,7 @@ const App: React.FC = () => {
 
   const handleSignup = async (userData: any) => {
     try {
-        const userCredential = await createUserWithEmailAndPassword(auth, userData.email, userData.password || 'password123');
+        const userCredential = await createUserWithEmailAndPassword(userData.email, userData.password || 'password123');
         await sendEmailVerification(userCredential.user);
         const newUserId = userCredential.user.uid;
         const newUserProfile: User = {
@@ -269,7 +287,6 @@ const App: React.FC = () => {
   return (
     <div className={`min-h-screen transition-colors duration-300 ${theme === 'dark' ? 'dark bg-dark-bg' : 'bg-primary-light'}`}>
       
-      {/* --- NOTIFICATION TOAST --- */}
       {activeToast && (
           <div onClick={() => { handleNavigate('notifications'); setActiveToast(null); }} className="fixed top-4 left-4 right-4 z-[100] bg-white dark:bg-dark-surface shadow-2xl border-l-8 border-primary rounded-2xl p-4 animate-bounce-in cursor-pointer">
               <div className="flex items-center gap-4">
@@ -285,13 +302,12 @@ const App: React.FC = () => {
           </div>
       )}
 
-      {/* --- PERMISSION REQUEST BANNER --- */}
       {showPermissionBanner && (
           <div className="fixed bottom-20 left-4 right-4 z-50 bg-primary text-white p-5 rounded-2xl shadow-2xl animate-fade-in border-2 border-white/20">
               <div className="flex items-center justify-between gap-4">
                   <div className="flex-1">
                       <h4 className="font-black text-sm uppercase">Enable Alerts? 🔔</h4>
-                      <p className="text-[10px] opacity-80 mt-1">Get real-time updates for messages and sales.</p>
+                      <p className="text-[10px] opacity-80 mt-1">Receive system alerts in your status bar.</p>
                   </div>
                   <div className="flex gap-2">
                     <button onClick={requestPushPermission} className="px-4 py-2 bg-white text-primary rounded-xl text-xs font-black shadow-lg uppercase active:scale-90 transition-transform">Allow</button>
