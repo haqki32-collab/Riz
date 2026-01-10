@@ -3,6 +3,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, Unsubscribe, sendEmailVerification } from 'firebase/auth';
 import { doc, setDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData, where } from 'firebase/firestore';
 import { getToken, onMessage } from 'firebase/messaging';
+import { App as CapacitorApp } from '@capacitor/app';
 import { auth, db, messaging } from './firebaseConfig';
 
 import Header from './components/common/Header';
@@ -37,6 +38,10 @@ const App: React.FC = () => {
   const [showPermissionBanner, setShowPermissionBanner] = useState(false);
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
   
+  // Navigation State
+  const [navigationHistory, setNavigationHistory] = useState<{view: AppView, payload?: NavigatePayload}[]>([]);
+  const lastBackPressTime = useRef<number>(0);
+
   const [selectedListing, setSelectedListing] = useState<Listing | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
   const [selectedVendorId, setSelectedVendorId] = useState<string | null>(null);
@@ -51,87 +56,110 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
 
-  // --- 🔄 ROBUST NAVIGATION ENGINE (Hash Based) ---
+  // --- 🛠️ ADVANCED NATIVE NAVIGATION ENGINE ---
 
-  // Is function se hum payload ko history state mein save karte hain
-  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload, shouldPush = true) => {
-    // 1. Internal Logic (State Updates)
+  const performViewUpdate = (newView: AppView, payload?: NavigatePayload) => {
+    // Sync React states based on the view
     if (newView !== 'details' && newView !== 'subcategories') {
-      setSelectedListing(null); setSelectedCategory(null);
+        setSelectedListing(null); setSelectedCategory(null);
     }
     if (newView !== 'listings' && newView !== 'details') setSearchQuery('');
+    
     if (payload?.listing && newView === 'details') setSelectedListing(payload.listing);
     if (payload?.category && newView === 'subcategories') setSelectedCategory(payload.category);
     if (payload?.query !== undefined && newView === 'listings') setSearchQuery(payload.query);
     if (payload?.targetUser && newView === 'chats') setChatTargetUser(payload.targetUser);
     if (payload?.targetVendorId && newView === 'vendor-profile') setSelectedVendorId(payload.targetVendorId);
 
-    if (newView === 'add-listing') { setInitialVendorTab('add-listing'); setView('vendor-dashboard'); }
-    else if (newView === 'my-ads') { setInitialVendorTab('my-listings'); setView('vendor-dashboard'); }
-    else if (newView === 'vendor-analytics') { setInitialVendorTab('dashboard'); setView('vendor-dashboard'); }
-    else if (newView === 'promote-business') { setInitialVendorTab('promotions'); setView('vendor-dashboard'); }
-    else setView(newView);
-
-    // 2. Browser History Sync
-    if (shouldPush) {
-        // Hash update karein takay hardware back button browser ko pichle record pe le jaye
-        const state = { view: newView, payload };
-        window.history.pushState(state, '', `#${newView}`);
+    // Handle Vendor Dashboard tabs
+    const vendorSubRoutes = ['add-listing', 'my-ads', 'vendor-analytics', 'promote-business'];
+    if (vendorSubRoutes.includes(newView as string)) {
+        const tab = newView === 'add-listing' ? 'add-listing' : 
+                    newView === 'my-ads' ? 'my-listings' : 
+                    newView === 'promote-business' ? 'promotions' : 'dashboard';
+        setInitialVendorTab(tab as any);
+        setView('vendor-dashboard');
+    } else {
+        setView(newView);
     }
-
     window.scrollTo(0, 0);
-  }, []);
+  };
 
-  // Listen for the Browser Back/Forward buttons
-  useEffect(() => {
-    const onPopState = (event: PopStateEvent) => {
-        if (event.state && event.state.view) {
-            // Agar history mein koi view hai, toh bina pushState kiye wahan jao
-            handleNavigate(event.state.view, event.state.payload, false);
-        } else {
-            // Root state (Initial load state)
-            handleNavigate('home', {}, false);
+  const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
+    // 1. Update the internal history stack
+    setNavigationHistory(prev => [...prev, { view, payload: undefined }]); // Save current view before changing
+    
+    // 2. Browser History Trick (Prevents browser back from exiting immediately)
+    window.history.pushState({ dummy: Date.now() }, '', '');
+
+    // 3. Update the UI
+    performViewUpdate(newView, payload);
+  }, [view]);
+
+  const handleGoBack = useCallback(() => {
+    if (navigationHistory.length > 0) {
+        const historyCopy = [...navigationHistory];
+        const lastEntry = historyCopy.pop();
+        setNavigationHistory(historyCopy);
+        
+        if (lastEntry) {
+            performViewUpdate(lastEntry.view, lastEntry.payload);
         }
-    };
+        return true; // We handled it
+    } else if (view !== 'home') {
+        setView('home');
+        setNavigationHistory([]);
+        return true;
+    }
+    return false; // Let default behavior happen (exit)
+  }, [navigationHistory, view]);
 
+  // NATIVE Hardware Back Button Listener
+  useEffect(() => {
+    const backButtonHandler = CapacitorApp.addListener('backButton', ({ canGoBack }) => {
+        const handled = handleGoBack();
+        
+        if (!handled && view === 'home') {
+            // "Double Back to Exit" Logic
+            const currentTime = Date.now();
+            if (currentTime - lastBackPressTime.current < 2000) {
+                CapacitorApp.exitApp();
+            } else {
+                lastBackPressTime.current = currentTime;
+                setActiveToast({
+                    id: 'exit-alert', userId: 'local', type: 'info', isRead: false, createdAt: new Date().toISOString(),
+                    title: "RizqDaan", message: "Pichla button dubara dabayen band karne ke liye."
+                });
+                setTimeout(() => setActiveToast(null), 2000);
+            }
+        }
+    });
+
+    // Browser Fallback (popstate)
+    const onPopState = (e: PopStateEvent) => {
+        handleGoBack();
+    };
     window.addEventListener('popstate', onPopState);
 
-    // Jab app pehli baar khule, Home state history mein daal dein
-    if (!window.history.state) {
-        window.history.replaceState({ view: 'home' }, '', '#home');
-    } else {
-        // Agar refresh kiya hai aur koi hash hai, toh wahan navigate karein
-        const hashView = window.location.hash.replace('#', '') as AppView;
-        if (hashView && hashView !== 'home') {
-             // Hum history.state se data restore kar sakte hain agar browser ne save kiya ho
-             handleNavigate(hashView, window.history.state.payload, false);
-        }
-    }
+    return () => {
+        backButtonHandler.then(h => h.remove());
+        window.removeEventListener('popstate', onPopState);
+    };
+  }, [handleGoBack, view]);
 
-    return () => window.removeEventListener('popstate', onPopState);
-  }, [handleNavigate]);
-
-  // --- 🔔 NOTIFICATIONS & FIREBASE ---
+  // --- 🔔 FIREBASE & DATA LOGIC ---
+  
   const triggerNativeNotification = (title: string, body: string) => {
       if (!('Notification' in window) || Notification.permission !== 'granted') return;
       navigator.serviceWorker.ready.then((registration) => {
           registration.showNotification(title, {
-              body: body,
-              icon: '/icon.png',
-              badge: '/favicon.ico',
-              tag: 'rizqdaan-alert',
-              renotify: true,
-              vibrate: [200, 100, 200],
-              silent: false,
+              body: body, icon: '/icon.png', badge: '/favicon.ico', tag: 'rizqdaan-alert', rennotify: true,
           } as any);
-      });
+      }).catch(() => {});
   };
 
   const requestPushPermission = async () => {
-      if (!('Notification' in window) || !messaging || !user?.id || !db) {
-          setShowPermissionBanner(false);
-          return;
-      }
+      if (!('Notification' in window) || !messaging || !user?.id || !db) { setShowPermissionBanner(false); return; }
       try {
           const permission = await Notification.requestPermission();
           if (permission === 'granted') {
@@ -139,35 +167,23 @@ const App: React.FC = () => {
               const token = await getToken(messaging, { vapidKey });
               if (token) {
                   await setDoc(doc(db, 'users', user.id), { fcmToken: token, notificationsEnabled: true }, { merge: true });
-                  triggerNativeNotification("RizqDaan alerts active! 🔊", "Mubarak ho! Ab aapko sound aur top bar alerts milenge.");
+                  triggerNativeNotification("RizqDaan alerts active! 🔊", "Mubarak ho! Alerts enable ho gaye.");
                   setShowPermissionBanner(false);
               }
-          } else {
-              setShowPermissionBanner(false);
-          }
-      } catch (e) {
-          setShowPermissionBanner(false);
-      }
+          } else { setShowPermissionBanner(false); }
+      } catch (e) { setShowPermissionBanner(false); }
   };
 
   useEffect(() => {
     if (user && messaging && 'Notification' in window) {
-        if (Notification.permission === 'default') {
-            setShowPermissionBanner(true);
-        }
+        if (Notification.permission === 'default') setShowPermissionBanner(true);
         try {
             const unsubscribeOnMessage = onMessage(messaging, (payload) => {
-                const title = payload.notification?.title || "RizqDaan Update";
-                const body = payload.notification?.body || "Check your app for details.";
+                const title = payload.notification?.title || "Update";
+                const body = payload.notification?.body || "Check your app.";
                 triggerNativeNotification(title, body);
                 setActiveToast({
-                    id: Date.now().toString(),
-                    userId: user.id,
-                    title: title,
-                    message: body,
-                    type: 'info',
-                    isRead: false,
-                    createdAt: new Date().toISOString()
+                    id: Date.now().toString(), userId: user.id, title, message: body, type: 'info', isRead: false, createdAt: new Date().toISOString()
                 });
                 setTimeout(() => setActiveToast(null), 6000);
             });
@@ -185,18 +201,13 @@ const App: React.FC = () => {
           if (firebaseUser && firebaseUser.emailVerified) {
               if (db) {
                   userUnsubscribe = onSnapshot(doc(db, "users", firebaseUser.uid), (docSnap) => {
-                      if (docSnap.exists()) {
-                          setUser({ id: firebaseUser.uid, ...docSnap.data() } as User);
-                      }
-                      clearTimeout(timeout);
-                      setIsReady(true);
-                  }, (err) => { setIsReady(true); });
+                      if (docSnap.exists()) setUser({ id: firebaseUser.uid, ...docSnap.data() } as User);
+                      clearTimeout(timeout); setIsReady(true);
+                  });
               } else { setIsReady(true); }
           } else {
               if (userUnsubscribe) userUnsubscribe();
-              setUser(null);
-              clearTimeout(timeout);
-              setIsReady(true);
+              setUser(null); clearTimeout(timeout); setIsReady(true);
           }
       } catch (e) { setIsReady(true); }
     });
@@ -238,13 +249,10 @@ const App: React.FC = () => {
     try {
         if (email === 'admin@rizqdaan.com' && password === 'admin') {
             const adminUser: User = { id: 'admin-demo', name: 'Admin', email: 'admin@rizqdaan.com', phone: '0000', shopName: 'Admin HQ', shopAddress: 'Cloud', isVerified: true, isAdmin: true };
-            setUser(adminUser); handleNavigate('admin'); return { success: true, message: 'Logged in as Demo Admin' };
+            setUser(adminUser); handleNavigate('admin'); return { success: true, message: 'Logged in' };
         }
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
-        if (!userCredential.user.emailVerified) {
-            await signOut(auth);
-            return { success: false, message: 'Please verify your email.' };
-        }
+        if (!userCredential.user.emailVerified) { await signOut(auth); return { success: false, message: 'Verify email.' }; }
         return { success: true, message: 'Login successful!' };
     } catch (error: any) { return { success: false, message: error.message }; }
   };
@@ -263,7 +271,7 @@ const App: React.FC = () => {
         };
         await setDoc(doc(db, "users", newUserId), newUserProfile);
         await signOut(auth);
-        return { success: true, message: 'Signup successful! Verification email sent.', user: newUserProfile };
+        return { success: true, message: 'Signup successful!', user: newUserProfile };
     } catch (error: any) { return { success: false, message: error.message }; }
   };
 
@@ -272,7 +280,7 @@ const App: React.FC = () => {
           <div className="flex h-screen items-center justify-center bg-primary">
               <div className="text-center p-8">
                   <h1 className="text-white font-black text-2xl tracking-widest mb-2 uppercase animate-pulse">Rizq Daan</h1>
-                  <p className="text-white/50 text-[10px] uppercase font-bold tracking-tighter">Preparing Sustenance...</p>
+                  <p className="text-white/50 text-[10px] uppercase font-bold tracking-tighter">Please wait...</p>
               </div>
           </div>
       );
@@ -287,18 +295,18 @@ const App: React.FC = () => {
       case 'vendor-profile': return selectedVendorId ? <VendorProfilePage vendorId={selectedVendorId} currentUser={user} listings={listingsDB} onNavigate={handleNavigate as any} /> : null;
       case 'auth': return <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={() => handleNavigate('auth')} />;
       case 'account': return user ? <AccountPage user={user} listings={listingsDB} onLogout={() => { signOut(auth); setUser(null); handleNavigate('home'); }} onNavigate={handleNavigate as any} /> : <AuthPage onLogin={handleLogin} onSignup={handleSignup} onVerifyAndLogin={() => handleNavigate('auth')} />;
-      case 'subcategories': return selectedCategory ? <SubCategoryPage category={selectedCategory} onNavigate={() => handleNavigate('home')} onListingNavigate={(v, q) => handleNavigate(v as any, { query: q })} /> : null;
-      case 'chats': return user ? <ChatPage currentUser={user} targetUser={chatTargetUser} onNavigate={() => handleNavigate('home')} /> : null;
+      case 'subcategories': return selectedCategory ? <SubCategoryPage category={selectedCategory} onNavigate={() => handleGoBack()} onListingNavigate={(v, q) => handleNavigate(v as any, { query: q })} /> : null;
+      case 'chats': return user ? <ChatPage currentUser={user} targetUser={chatTargetUser} onNavigate={() => handleGoBack()} /> : null;
       case 'favorites': return user ? <FavoritesPage user={user} listings={listingsDB} onNavigate={handleNavigate as any} /> : null;
       case 'saved-searches': return user ? <SavedSearchesPage searches={user.savedSearches || []} onNavigate={handleNavigate as any} /> : null;
       case 'edit-profile': return user ? <EditProfilePage user={user} onNavigate={handleNavigate as any} /> : null;
       case 'settings': return user ? <SettingsPage user={user} onNavigate={handleNavigate as any} currentTheme={theme} toggleTheme={() => setTheme(t => t === 'light' ? 'dark' : 'light')} onLogout={() => { signOut(auth); setUser(null); handleNavigate('home'); }} /> : null;
       case 'admin': return user?.isAdmin ? <AdminPanel users={[]} listings={listingsDB} onUpdateUserVerification={() => {}} onDeleteListing={() => {}} onImpersonate={(u) => { setUser(u); handleNavigate('vendor-dashboard'); }} onNavigate={handleNavigate as any} /> : null;
-      case 'add-balance': return user ? <AddFundsPage user={user} onNavigate={() => handleNavigate('account')} /> : null;
-      case 'referrals': return user ? <ReferralPage user={user} onNavigate={() => handleNavigate('account')} /> : null;
-      case 'wallet-history': return user ? <WalletHistoryPage user={user} onNavigate={() => handleNavigate('account')} /> : null;
+      case 'add-balance': return user ? <AddFundsPage user={user} onNavigate={() => handleGoBack()} /> : null;
+      case 'referrals': return user ? <ReferralPage user={user} onNavigate={() => handleGoBack()} /> : null;
+      case 'wallet-history': return user ? <WalletHistoryPage user={user} onNavigate={() => handleGoBack()} /> : null;
       case 'notifications': return user ? <NotificationsPage user={user} onNavigate={handleNavigate as any} /> : null;
-      case 'help-center': return <HelpCenterPage onNavigate={() => handleNavigate('account')} />;
+      case 'help-center': return <HelpCenterPage onNavigate={() => handleGoBack()} />;
       default: return <HomePage listings={listingsDB} categories={categories} onNavigate={handleNavigate as any} onSaveSearch={() => {}} />;
     }
   };
@@ -307,7 +315,7 @@ const App: React.FC = () => {
     <div className={`min-h-screen transition-colors duration-300 ${theme === 'dark' ? 'dark bg-dark-bg' : 'bg-primary-light'}`}>
       
       {activeToast && (
-          <div onClick={() => { handleNavigate('notifications'); setActiveToast(null); }} className="fixed top-4 left-4 right-4 z-[100] bg-white dark:bg-dark-surface shadow-2xl border-l-8 border-primary rounded-2xl p-4 animate-bounce-in cursor-pointer">
+          <div onClick={() => activeToast.id !== 'exit-alert' && handleNavigate('notifications')} className="fixed top-4 left-4 right-4 z-[100] bg-white dark:bg-dark-surface shadow-2xl border-l-8 border-primary rounded-2xl p-4 animate-bounce-in cursor-pointer">
               <div className="flex items-center gap-4">
                   <div className="bg-primary/10 p-2 rounded-full text-primary">
                        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
@@ -324,13 +332,10 @@ const App: React.FC = () => {
       {showPermissionBanner && (
           <div className="fixed bottom-20 left-4 right-4 z-50 bg-primary text-white p-5 rounded-2xl shadow-2xl animate-fade-in border-2 border-white/20">
               <div className="flex items-center justify-between gap-4">
-                  <div className="flex-1">
-                      <h4 className="font-black text-sm uppercase">Enable Alerts? 🔔</h4>
-                      <p className="text-[10px] opacity-80 mt-1">Receive sound alerts in your status bar.</p>
-                  </div>
+                  <div className="flex-1"><h4 className="font-black text-sm uppercase">Enable Alerts?</h4><p className="text-[10px] opacity-80 mt-1">Get sound alerts for messages.</p></div>
                   <div className="flex gap-2">
-                    <button onClick={requestPushPermission} className="px-4 py-2 bg-white text-primary rounded-xl text-xs font-black shadow-lg uppercase active:scale-90 transition-transform">Allow</button>
-                    <button onClick={() => setShowPermissionBanner(false)} className="px-3 text-white/50 text-xs font-bold uppercase">Skip</button>
+                    <button onClick={requestPushPermission} className="px-4 py-2 bg-white text-primary rounded-xl text-xs font-black shadow-lg">Allow</button>
+                    <button onClick={() => setShowPermissionBanner(false)} className="px-3 text-white/50 text-xs font-bold">Skip</button>
                   </div>
               </div>
           </div>
@@ -346,4 +351,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-44
