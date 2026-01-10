@@ -16,7 +16,7 @@ const Header: React.FC<HeaderProps> = ({ onNavigate, toggleTheme, currentTheme, 
 
   // Real-time Unread Notification Listener
   useEffect(() => {
-      // CRITICAL: Only run listener if user and user.id exist to avoid permission errors
+      // CRITICAL: Prevent execution if not logged in or db not connected
       if (!user?.id || !db) {
           setUnreadCount(0);
           return;
@@ -30,17 +30,17 @@ const Header: React.FC<HeaderProps> = ({ onNavigate, toggleTheme, currentTheme, 
           );
 
           const unsubscribe = onSnapshot(q, (snap) => {
-              setUnreadCount(snap.size);
+              if (snap) setUnreadCount(snap.size);
           }, (err) => {
-              // Gracefully handle permission race conditions
-              if (!err.message.includes('permission')) {
-                  console.error("Badge error", err.message);
+              // Non-blocking error logging
+              if (err.code !== 'permission-denied') {
+                  console.warn("Badge Listener Error (Silent):", err.message);
               }
           });
 
           return () => unsubscribe();
       } catch (e) {
-          return;
+          console.error("Header Notification Query Failed:", e);
       }
   }, [user?.id]);
 
