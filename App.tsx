@@ -1,9 +1,9 @@
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, Unsubscribe, sendEmailVerification } from 'firebase/auth';
-import { doc, setDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
-import { auth, db } from './firebaseConfig';
-import { Capacitor } from '@capacitor/core';
+import { doc, setDoc, collection, onSnapshot, query, orderBy, limit, startAfter, getDocs, QueryDocumentSnapshot, DocumentData, where } from 'firebase/firestore';
+import { getToken, onMessage } from 'firebase/messaging';
+import { auth, db, messaging } from './firebaseConfig';
 
 import Header from './components/common/Header';
 import BottomNavBar from './components/common/BottomNavBar';
@@ -26,7 +26,7 @@ import AddFundsPage from './components/pages/AddFundsPage';
 import WalletHistoryPage from './components/pages/WalletHistoryPage';
 import NotificationsPage from './components/pages/NotificationsPage'; 
 import HelpCenterPage from './components/pages/HelpCenterPage';
-import { Listing, User, Category, Transaction, AppView, NavigatePayload } from './types';
+import { Listing, User, Category, AppView, NavigatePayload, AppNotification } from './types';
 import { CATEGORIES as DEFAULT_CATEGORIES } from './constants';
 
 const App: React.FC = () => {
@@ -34,6 +34,8 @@ const App: React.FC = () => {
   const [view, setView] = useState<AppView>('home');
   const [user, setUser] = useState<User | null>(null);
   const [isReady, setIsReady] = useState(false);
+  const [showPermissionBanner, setShowPermissionBanner] = useState(false);
+  const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
   
   const [selectedListing, setSelectedListing] = useState<Listing | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
@@ -46,10 +48,61 @@ const App: React.FC = () => {
   
   const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
   const [chatTargetUser, setChatTargetUser] = useState<{id: string, name: string} | null>(null);
-  const [usersDB, setUsersDB] = useState<User[]>([]);
-
-  const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // --- 🔔 PUSH NOTIFICATION SYSTEM ---
+  const requestPushPermission = async () => {
+      if (!messaging || !user?.id || !db) return;
+      try {
+          const permission = await Notification.requestPermission();
+          if (permission === 'granted') {
+              // KEY FROM YOUR SCREENSHOT (Public Key)
+              const vapidKey = 'BAw_pNvmzPURAsecjQH0V3aPbVQ-PmvrZiui2YhyWOwYGb71ycnVejhE-O7qMOZ84oCa6uL-IcBwoyRgEENirlw';
+              
+              const token = await getToken(messaging, { vapidKey });
+              if (token) {
+                  // Save token to user profile for server-side pushes
+                  await setDoc(doc(db, 'users', user.id), { 
+                      fcmToken: token,
+                      notificationsEnabled: true 
+                  }, { merge: true });
+                  setShowPermissionBanner(false);
+                  alert("Notifications Enabled! You will now receive real-time alerts.");
+              }
+          } else {
+              alert("Permission Denied. You can enable it manually in browser settings.");
+              setShowPermissionBanner(false);
+          }
+      } catch (e) {
+          console.error("Messaging setup failed:", e);
+      }
+  };
+
+  useEffect(() => {
+    if (user && messaging) {
+        // Show banner if permission not yet asked
+        if (Notification.permission === 'default') {
+            setShowPermissionBanner(true);
+        }
+        
+        // Handle incoming foreground messages
+        const unsubscribeOnMessage = onMessage(messaging, (payload) => {
+            setActiveToast({
+                id: Date.now().toString(),
+                userId: user.id,
+                title: payload.notification?.title || "New Message",
+                message: payload.notification?.body || "",
+                type: 'info',
+                isRead: false,
+                createdAt: new Date().toISOString()
+            });
+            // Auto-hide toast after 6 seconds
+            setTimeout(() => setActiveToast(null), 6000);
+        });
+
+        return () => unsubscribeOnMessage();
+    }
+  }, [user]);
 
   const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
     if (newView !== 'details' && newView !== 'subcategories') {
@@ -70,71 +123,46 @@ const App: React.FC = () => {
     window.scrollTo(0, 0);
   }, []);
 
-  // Sync Cached Push Token when internet is definitely stable
-  useEffect(() => {
-    if (isReady && user?.id && db) {
-        const cachedToken = localStorage.getItem('rizqdaan_fcm_token');
-        const lastSync = localStorage.getItem('rizqdaan_fcm_last_sync');
-        
-        if (cachedToken && (!lastSync || Date.now() - parseInt(lastSync) > 86400000)) {
-            console.log("Syncing cached FCM token to Firestore...");
-            setDoc(doc(db, 'users', user.id), { fcmToken: cachedToken }, { merge: true })
-                .then(() => localStorage.setItem('rizqdaan_fcm_last_sync', Date.now().toString()))
-                .catch(() => {});
-        }
-    }
-  }, [isReady, user?.id]);
+  const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
 
   useEffect(() => {
-    if (!auth) return;
+    if (!auth) { setIsReady(true); return; }
+    const timeout = setTimeout(() => { if (!isReady) setIsReady(true); }, 8000);
     let userUnsubscribe: Unsubscribe | null = null;
-
     const authUnsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-          if (firebaseUser.emailVerified) {
-              if (db) {
-                  try {
-                      userUnsubscribe = onSnapshot(doc(db, "users", firebaseUser.uid), (docSnap) => {
-                          if (docSnap.exists()) {
-                              setUser({ id: firebaseUser.uid, ...docSnap.data() } as User);
-                          }
-                          setIsReady(true);
-                      }, (err) => {
-                          console.error("Snapshot error:", err);
-                          setIsReady(true);
-                      });
-                  } catch (e) { setIsReady(true); }
-              } else { setIsReady(true); }
-          } else {
-              setUser(null);
-              setIsReady(true);
-          }
+      if (firebaseUser && firebaseUser.emailVerified) {
+          if (db) {
+              try {
+                  userUnsubscribe = onSnapshot(doc(db, "users", firebaseUser.uid), (docSnap) => {
+                      if (docSnap.exists()) {
+                          setUser({ id: firebaseUser.uid, ...docSnap.data() } as User);
+                      }
+                      clearTimeout(timeout);
+                      setIsReady(true);
+                  }, () => { clearTimeout(timeout); setIsReady(true); });
+              } catch (e) { setIsReady(true); }
+          } else { setIsReady(true); }
       } else {
-          if (userUnsubscribe) { userUnsubscribe(); userUnsubscribe = null; }
+          if (userUnsubscribe) userUnsubscribe();
           setUser(null);
+          clearTimeout(timeout);
           setIsReady(true);
       }
     });
-
-    return () => {
-        authUnsubscribe();
-        if (userUnsubscribe) userUnsubscribe();
-    };
+    return () => { authUnsubscribe(); if (userUnsubscribe) userUnsubscribe(); clearTimeout(timeout); };
   }, []);
 
   useEffect(() => {
-      if (!db) return;
+      if (!db || !isReady) return;
       const q = query(collection(db, "listings"), orderBy("createdAt", "desc"), limit(20));
       const unsubscribe = onSnapshot(q, (snapshot) => {
           const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Listing));
           setListingsDB(items);
           setLastListingDoc(snapshot.docs[snapshot.docs.length - 1] || null);
           setHasMoreListings(snapshot.docs.length >= 20);
-      }, (err) => {
-          console.error("Listings fetch error:", err);
       });
       return () => unsubscribe();
-  }, []);
+  }, [isReady]);
 
   const fetchMoreListings = async () => {
       if (!db || loadingData || !hasMoreListings || !lastListingDoc) return;
@@ -191,10 +219,9 @@ const App: React.FC = () => {
   if (!isReady) {
       return (
           <div className="flex h-screen items-center justify-center bg-primary">
-              <div className="text-center">
-                  <div className="animate-spin rounded-full h-12 w-12 border-4 border-white border-t-transparent mb-4 mx-auto"></div>
-                  <h1 className="text-white font-bold text-xl tracking-widest">RIZQ DAAN</h1>
-                  <p className="text-white/60 text-xs mt-2">Connecting to Services...</p>
+              <div className="text-center p-8 animate-pulse">
+                  <h1 className="text-white font-black text-2xl tracking-widest mb-2 uppercase">Rizq Daan</h1>
+                  <p className="text-white/50 text-xs uppercase font-bold tracking-tighter">Connecting Securely...</p>
               </div>
           </div>
       );
@@ -215,7 +242,7 @@ const App: React.FC = () => {
       case 'saved-searches': return user ? <SavedSearchesPage searches={user.savedSearches || []} onNavigate={handleNavigate as any} /> : null;
       case 'edit-profile': return user ? <EditProfilePage user={user} onNavigate={handleNavigate} /> : null;
       case 'settings': return user ? <SettingsPage user={user} onNavigate={handleNavigate} currentTheme={theme} toggleTheme={() => setTheme(t => t === 'light' ? 'dark' : 'light')} onLogout={() => { signOut(auth); setUser(null); setView('home'); }} /> : null;
-      case 'admin': return user?.isAdmin ? <AdminPanel users={usersDB} listings={listingsDB} onUpdateUserVerification={() => {}} onDeleteListing={() => {}} onImpersonate={(u) => { setUser(u); setView('vendor-dashboard'); }} onNavigate={handleNavigate} /> : null;
+      case 'admin': return user?.isAdmin ? <AdminPanel users={[]} listings={listingsDB} onUpdateUserVerification={() => {}} onDeleteListing={() => {}} onImpersonate={(u) => { setUser(u); setView('vendor-dashboard'); }} onNavigate={handleNavigate} /> : null;
       case 'add-balance': return user ? <AddFundsPage user={user} onNavigate={() => setView('account')} /> : null;
       case 'referrals': return user ? <ReferralPage user={user} onNavigate={() => setView('account')} /> : null;
       case 'wallet-history': return user ? <WalletHistoryPage user={user} onNavigate={() => setView('account')} /> : null;
@@ -227,6 +254,42 @@ const App: React.FC = () => {
 
   return (
     <div className={`min-h-screen transition-colors duration-300 ${theme === 'dark' ? 'dark bg-dark-bg' : 'bg-primary-light'}`}>
+      
+      {/* --- IN-APP TOAST NOTIFICATION --- */}
+      {activeToast && (
+          <div 
+            onClick={() => { handleNavigate('notifications'); setActiveToast(null); }} 
+            className="fixed top-4 left-4 right-4 z-[100] bg-white dark:bg-dark-surface shadow-2xl border-l-8 border-primary rounded-2xl p-4 animate-bounce-in cursor-pointer active:scale-95 transition-all"
+          >
+              <div className="flex items-center gap-4">
+                  <div className="bg-primary/10 p-2 rounded-full text-primary">
+                       <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                      <h4 className="text-sm font-black text-gray-900 dark:text-white truncate uppercase tracking-tighter">{activeToast.title}</h4>
+                      <p className="text-xs text-gray-500 truncate">{activeToast.message}</p>
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); setActiveToast(null); }} className="text-gray-400 p-1">✕</button>
+              </div>
+          </div>
+      )}
+
+      {/* --- PERMISSION REQUEST BANNER --- */}
+      {showPermissionBanner && (
+          <div className="fixed bottom-20 left-4 right-4 z-50 bg-primary text-white p-5 rounded-2xl shadow-2xl animate-fade-in border-2 border-white/20">
+              <div className="flex items-center justify-between gap-4">
+                  <div className="flex-1">
+                      <h4 className="font-black text-sm uppercase">Stay Updated! 🔔</h4>
+                      <p className="text-[10px] opacity-80 mt-1 leading-tight">Enable notifications to receive instant alerts for new messages, orders, and wallet updates.</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={requestPushPermission} className="px-4 py-2 bg-white text-primary rounded-xl text-xs font-black shadow-lg uppercase active:scale-90 transition-transform">Allow</button>
+                    <button onClick={() => setShowPermissionBanner(false)} className="px-3 text-white/50 text-xs font-bold uppercase">Skip</button>
+                  </div>
+              </div>
+          </div>
+      )}
+
       <Header onNavigate={handleNavigate as any} toggleTheme={() => setTheme(t => t === 'light' ? 'dark' : 'light')} currentTheme={theme} user={user} />
       <main className={view === 'home' ? "container mx-auto px-4 sm:px-6 lg:px-8 pt-0 pb-24" : "container mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-24"}>
         {renderView()}
