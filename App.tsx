@@ -50,57 +50,62 @@ const App: React.FC = () => {
   const [chatTargetUser, setChatTargetUser] = useState<{id: string, name: string} | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // --- 🔔 PUSH NOTIFICATION SYSTEM ---
+  // --- 🔔 SAFE NOTIFICATION PERMISSION HANDLER ---
   const requestPushPermission = async () => {
-      if (!messaging || !user?.id || !db) return;
+      // Check if browser supports notifications
+      if (!('Notification' in window) || !messaging || !user?.id || !db) {
+          console.warn("Notifications not supported or messaging not ready");
+          setShowPermissionBanner(false);
+          return;
+      }
+
       try {
           const permission = await Notification.requestPermission();
           if (permission === 'granted') {
-              // KEY FROM YOUR SCREENSHOT (Public Key)
+              // REAL PUBLIC VAPID KEY (Dikh rahi hai aapke screenshot ke background mein)
               const vapidKey = 'BAw_pNvmzPURAsecjQH0V3aPbVQ-PmvrZiui2YhyWOwYGb71ycnVejhE-O7qMOZ84oCa6uL-IcBwoyRgEENirlw';
               
               const token = await getToken(messaging, { vapidKey });
               if (token) {
-                  // Save token to user profile for server-side pushes
                   await setDoc(doc(db, 'users', user.id), { 
                       fcmToken: token,
                       notificationsEnabled: true 
                   }, { merge: true });
                   setShowPermissionBanner(false);
-                  alert("Notifications Enabled! You will now receive real-time alerts.");
               }
           } else {
-              alert("Permission Denied. You can enable it manually in browser settings.");
               setShowPermissionBanner(false);
           }
       } catch (e) {
-          console.error("Messaging setup failed:", e);
+          console.error("Messaging setup error (Handled):", e);
+          setShowPermissionBanner(false);
       }
   };
 
   useEffect(() => {
-    if (user && messaging) {
-        // Show banner if permission not yet asked
+    // SAFE INITIALIZATION: Only run if all conditions met and won't crash the app
+    if (user && messaging && typeof window !== 'undefined' && 'Notification' in window) {
         if (Notification.permission === 'default') {
             setShowPermissionBanner(true);
         }
         
-        // Handle incoming foreground messages
-        const unsubscribeOnMessage = onMessage(messaging, (payload) => {
-            setActiveToast({
-                id: Date.now().toString(),
-                userId: user.id,
-                title: payload.notification?.title || "New Message",
-                message: payload.notification?.body || "",
-                type: 'info',
-                isRead: false,
-                createdAt: new Date().toISOString()
+        try {
+            const unsubscribeOnMessage = onMessage(messaging, (payload) => {
+                setActiveToast({
+                    id: Date.now().toString(),
+                    userId: user.id,
+                    title: payload.notification?.title || "Update",
+                    message: payload.notification?.body || "",
+                    type: 'info',
+                    isRead: false,
+                    createdAt: new Date().toISOString()
+                });
+                setTimeout(() => setActiveToast(null), 6000);
             });
-            // Auto-hide toast after 6 seconds
-            setTimeout(() => setActiveToast(null), 6000);
-        });
-
-        return () => unsubscribeOnMessage();
+            return () => unsubscribeOnMessage();
+        } catch (e) {
+            console.error("onMessage error:", e);
+        }
     }
   }, [user]);
 
@@ -127,25 +132,32 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!auth) { setIsReady(true); return; }
-    const timeout = setTimeout(() => { if (!isReady) setIsReady(true); }, 8000);
+    // Hard timeout to ensure app never stays stuck on splash
+    const timeout = setTimeout(() => { if (!isReady) setIsReady(true); }, 6000);
+    
     let userUnsubscribe: Unsubscribe | null = null;
     const authUnsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser && firebaseUser.emailVerified) {
-          if (db) {
-              try {
+      try {
+          if (firebaseUser && firebaseUser.emailVerified) {
+              if (db) {
                   userUnsubscribe = onSnapshot(doc(db, "users", firebaseUser.uid), (docSnap) => {
                       if (docSnap.exists()) {
                           setUser({ id: firebaseUser.uid, ...docSnap.data() } as User);
                       }
                       clearTimeout(timeout);
                       setIsReady(true);
-                  }, () => { clearTimeout(timeout); setIsReady(true); });
-              } catch (e) { setIsReady(true); }
-          } else { setIsReady(true); }
-      } else {
-          if (userUnsubscribe) userUnsubscribe();
-          setUser(null);
-          clearTimeout(timeout);
+                  }, (err) => { 
+                      console.error("User Snapshot Error:", err);
+                      setIsReady(true); 
+                  });
+              } else { setIsReady(true); }
+          } else {
+              if (userUnsubscribe) userUnsubscribe();
+              setUser(null);
+              clearTimeout(timeout);
+              setIsReady(true);
+          }
+      } catch (e) {
           setIsReady(true);
       }
     });
@@ -160,6 +172,8 @@ const App: React.FC = () => {
           setListingsDB(items);
           setLastListingDoc(snapshot.docs[snapshot.docs.length - 1] || null);
           setHasMoreListings(snapshot.docs.length >= 20);
+      }, (err) => {
+          console.error("Listings listener error:", err);
       });
       return () => unsubscribe();
   }, [isReady]);
@@ -219,9 +233,9 @@ const App: React.FC = () => {
   if (!isReady) {
       return (
           <div className="flex h-screen items-center justify-center bg-primary">
-              <div className="text-center p-8 animate-pulse">
-                  <h1 className="text-white font-black text-2xl tracking-widest mb-2 uppercase">Rizq Daan</h1>
-                  <p className="text-white/50 text-xs uppercase font-bold tracking-tighter">Connecting Securely...</p>
+              <div className="text-center p-8">
+                  <h1 className="text-white font-black text-2xl tracking-widest mb-2 uppercase animate-pulse">Rizq Daan</h1>
+                  <p className="text-white/50 text-[10px] uppercase font-bold tracking-tighter">Preparing Sustenance...</p>
               </div>
           </div>
       );
@@ -255,12 +269,9 @@ const App: React.FC = () => {
   return (
     <div className={`min-h-screen transition-colors duration-300 ${theme === 'dark' ? 'dark bg-dark-bg' : 'bg-primary-light'}`}>
       
-      {/* --- IN-APP TOAST NOTIFICATION --- */}
+      {/* --- NOTIFICATION TOAST --- */}
       {activeToast && (
-          <div 
-            onClick={() => { handleNavigate('notifications'); setActiveToast(null); }} 
-            className="fixed top-4 left-4 right-4 z-[100] bg-white dark:bg-dark-surface shadow-2xl border-l-8 border-primary rounded-2xl p-4 animate-bounce-in cursor-pointer active:scale-95 transition-all"
-          >
+          <div onClick={() => { handleNavigate('notifications'); setActiveToast(null); }} className="fixed top-4 left-4 right-4 z-[100] bg-white dark:bg-dark-surface shadow-2xl border-l-8 border-primary rounded-2xl p-4 animate-bounce-in cursor-pointer">
               <div className="flex items-center gap-4">
                   <div className="bg-primary/10 p-2 rounded-full text-primary">
                        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
@@ -279,8 +290,8 @@ const App: React.FC = () => {
           <div className="fixed bottom-20 left-4 right-4 z-50 bg-primary text-white p-5 rounded-2xl shadow-2xl animate-fade-in border-2 border-white/20">
               <div className="flex items-center justify-between gap-4">
                   <div className="flex-1">
-                      <h4 className="font-black text-sm uppercase">Stay Updated! 🔔</h4>
-                      <p className="text-[10px] opacity-80 mt-1 leading-tight">Enable notifications to receive instant alerts for new messages, orders, and wallet updates.</p>
+                      <h4 className="font-black text-sm uppercase">Enable Alerts? 🔔</h4>
+                      <p className="text-[10px] opacity-80 mt-1">Get real-time updates for messages and sales.</p>
                   </div>
                   <div className="flex gap-2">
                     <button onClick={requestPushPermission} className="px-4 py-2 bg-white text-primary rounded-xl text-xs font-black shadow-lg uppercase active:scale-90 transition-transform">Allow</button>
