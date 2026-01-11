@@ -90,7 +90,6 @@ const DashboardView = ({ campaigns, user, onAddFunds }: { campaigns: AdCampaign[
             const campaignRef = doc(db, 'campaigns', campaign.id);
             batch.update(campaignRef, { status: newStatus });
             
-            // SYNC: If paused, remove from featured section. If active, put back in featured.
             if (campaign.listingId) {
                 const listingRef = doc(db, 'listings', campaign.listingId);
                 batch.update(listingRef, { isPromoted: newStatus === 'active' });
@@ -120,20 +119,16 @@ const DashboardView = ({ campaigns, user, onAddFunds }: { campaigns: AdCampaign[
             let refundAmount = 0;
 
             if (isPending) {
-                // 1. Full refund for pending ads
                 refundAmount = campaign.totalCost;
             } else {
-                // 2. Pro-rated refund for active/paused ads
                 const now = new Date();
                 const end = new Date(campaign.endDate);
                 const diffMs = end.getTime() - now.getTime();
-                // Get remaining full days
                 const remainingDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
                 const dailyRate = campaign.totalCost / campaign.durationDays;
                 refundAmount = Math.floor(remainingDays * dailyRate);
             }
             
-            // 3. Process Wallet Refund
             if (refundAmount > 0) {
                 const userRef = doc(db, 'users', user.id);
                 const refundTx: Transaction = {
@@ -152,13 +147,11 @@ const DashboardView = ({ campaigns, user, onAddFunds }: { campaigns: AdCampaign[
                 });
             }
 
-            // 4. Remove Featured Status from Listing
             if (campaign.listingId) {
                 const listingRef = doc(db, 'listings', campaign.listingId);
                 batch.update(listingRef, { isPromoted: false });
             }
 
-            // 5. Mark Campaign as Completed (moves it to history tab)
             const campaignRef = doc(db, 'campaigns', campaign.id);
             batch.update(campaignRef, { 
                 status: isPending ? 'rejected' : 'completed', 
@@ -286,6 +279,7 @@ const CreateCampaignWizard = ({ user, listings, adRates, onCancel, onSuccess, in
     const [processing, setProcessing] = useState(false);
     const totalCost = duration * (adRates[campaignType] || 100);
     const canAfford = (user?.wallet?.balance || 0) >= totalCost;
+
     const handleSubmit = async () => {
         if (!user || !canAfford || !db) return;
         setProcessing(true);
@@ -333,23 +327,33 @@ const CreateCampaignWizard = ({ user, listings, adRates, onCancel, onSuccess, in
             setProcessing(false);
         }
     };
+
     const renderStep1 = () => (
         <div className="space-y-6 animate-fade-in">
             <h3 className="text-xl font-bold dark:text-white">1. Choose Promotion Type</h3>
             <div className="grid grid-cols-1 gap-4">
                 {[
-                    { id: 'featured_listing', label: 'Featured Listing', desc: 'Appear at the top of search results.', icon: '⭐' },
-                    { id: 'banner_ad', label: 'Home Banner Ad', desc: 'Main slider on home page (Max visibility).', icon: '🖼️' },
-                    { id: 'social_boost', label: 'Social Media Boost', desc: 'Promotion across our WhatsApp & FB groups.', icon: '🚀' }
+                    { id: 'featured_listing', label: 'Featured Listing', desc: 'Appear at the top of search results.', icon: '⭐', isComingSoon: false },
+                    { id: 'banner_ad', label: 'Home Banner Ad', desc: 'Main slider on home page (Max visibility).', icon: '🖼️', isComingSoon: true },
+                    { id: 'social_boost', label: 'Social Media Boost', desc: 'Promotion across our WhatsApp & FB groups.', icon: '🚀', isComingSoon: true }
                 ].map(type => (
                     <button 
                         key={type.id}
-                        onClick={() => setCampaignType(type.id as any)}
-                        className={`p-5 rounded-2xl border-2 text-left transition-all ${campaignType === type.id ? 'border-primary bg-primary/5 shadow-inner' : 'border-gray-100 dark:border-gray-800'}`}
+                        disabled={type.isComingSoon}
+                        onClick={() => !type.isComingSoon && setCampaignType(type.id as any)}
+                        className={`relative p-5 rounded-2xl border-2 text-left transition-all ${
+                            type.isComingSoon ? 'opacity-60 grayscale cursor-not-allowed border-gray-100 dark:border-gray-800' :
+                            campaignType === type.id ? 'border-primary bg-primary/5 shadow-inner' : 'border-gray-100 dark:border-gray-800'
+                        }`}
                     >
+                        {type.isComingSoon && (
+                            <span className="absolute top-4 right-4 bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-[9px] font-black uppercase px-2 py-1 rounded-md tracking-widest shadow-sm">
+                                Coming Soon
+                            </span>
+                        )}
                         <div className="flex justify-between items-center">
                             <span className="text-2xl">{type.icon}</span>
-                            <span className="font-black text-primary">Rs. {adRates[type.id]}/day</span>
+                            {!type.isComingSoon && <span className="font-black text-primary">Rs. {adRates[type.id]}/day</span>}
                         </div>
                         <h4 className="font-bold dark:text-white mt-2">{type.label}</h4>
                         <p className="text-xs text-gray-500 mt-1">{type.desc}</p>
@@ -359,6 +363,7 @@ const CreateCampaignWizard = ({ user, listings, adRates, onCancel, onSuccess, in
             <button onClick={() => setStep(2)} className="w-full py-4 bg-primary text-white font-bold rounded-2xl shadow-lg">Continue</button>
         </div>
     );
+
     const renderStep2 = () => (
         <div className="space-y-6 animate-fade-in">
             <h3 className="text-xl font-bold dark:text-white">2. Select Your Ad Content</h3>
