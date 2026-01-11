@@ -39,7 +39,7 @@ const App: React.FC = () => {
   const [activeToast, setActiveToast] = useState<AppNotification | null>(null);
   
   // Navigation State
-  const [navigationHistory, setNavigationHistory] = useState<{view: AppView, payload?: NavigatePayload}[]>([]);
+  const [navigationStack, setNavigationStack] = useState<{view: AppView, payload?: NavigatePayload}[]>([]);
   const lastBackPressTime = useRef<number>(0);
 
   const [selectedListing, setSelectedListing] = useState<Listing | null>(null);
@@ -56,10 +56,8 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [initialVendorTab, setInitialVendorTab] = useState<'dashboard' | 'my-listings' | 'add-listing' | 'promotions'>('dashboard');
 
-  // --- 🛠️ ADVANCED NATIVE NAVIGATION ENGINE ---
-
-  const performViewUpdate = (newView: AppView, payload?: NavigatePayload) => {
-    // Sync React states based on the view
+  // Core View Logic
+  const syncViewData = (newView: AppView, payload?: NavigatePayload) => {
     if (newView !== 'details' && newView !== 'subcategories') {
         setSelectedListing(null); setSelectedCategory(null);
     }
@@ -71,7 +69,6 @@ const App: React.FC = () => {
     if (payload?.targetUser && newView === 'chats') setChatTargetUser(payload.targetUser);
     if (payload?.targetVendorId && newView === 'vendor-profile') setSelectedVendorId(payload.targetVendorId);
 
-    // Handle Vendor Dashboard tabs
     const vendorSubRoutes = ['add-listing', 'my-ads', 'vendor-analytics', 'promote-business'];
     if (vendorSubRoutes.includes(newView as string)) {
         const tab = newView === 'add-listing' ? 'add-listing' : 
@@ -82,45 +79,53 @@ const App: React.FC = () => {
     } else {
         setView(newView);
     }
-    window.scrollTo(0, 0);
   };
 
   const handleNavigate = useCallback((newView: AppView, payload?: NavigatePayload) => {
-    // 1. Update the internal history stack
-    setNavigationHistory(prev => [...prev, { view, payload: undefined }]); // Save current view before changing
+    setNavigationStack(prev => [...prev, { view, payload: { 
+        listing: selectedListing || undefined, 
+        category: selectedCategory || undefined,
+        query: searchQuery,
+        targetUser: chatTargetUser || undefined,
+        targetVendorId: selectedVendorId || undefined
+    } }]);
     
-    // 2. Browser History Trick (Prevents browser back from exiting immediately)
-    window.history.pushState({ dummy: Date.now() }, '', '');
-
-    // 3. Update the UI
-    performViewUpdate(newView, payload);
-  }, [view]);
+    // Manage browser history to handle back button correctly
+    window.history.pushState({ view: newView }, '', '');
+    syncViewData(newView, payload);
+    window.scrollTo(0, 0);
+  }, [view, selectedListing, selectedCategory, searchQuery, chatTargetUser, selectedVendorId]);
 
   const handleGoBack = useCallback(() => {
-    if (navigationHistory.length > 0) {
-        const historyCopy = [...navigationHistory];
-        const lastEntry = historyCopy.pop();
-        setNavigationHistory(historyCopy);
+    if (navigationStack.length > 0) {
+        const stackCopy = [...navigationStack];
+        const prevEntry = stackCopy.pop();
+        setNavigationStack(stackCopy);
         
-        if (lastEntry) {
-            performViewUpdate(lastEntry.view, lastEntry.payload);
+        if (prevEntry) {
+            syncViewData(prevEntry.view, prevEntry.payload);
+            return true;
         }
-        return true; // We handled it
     } else if (view !== 'home') {
         setView('home');
-        setNavigationHistory([]);
+        setNavigationStack([]);
         return true;
     }
-    return false; // Let default behavior happen (exit)
-  }, [navigationHistory, view]);
+    return false;
+  }, [navigationStack, view]);
 
-  // NATIVE Hardware Back Button Listener
+  // Back Button Listeners
   useEffect(() => {
-    const backButtonHandler = CapacitorApp.addListener('backButton', ({ canGoBack }) => {
+    const onPopState = (e: PopStateEvent) => {
         const handled = handleGoBack();
-        
         if (!handled && view === 'home') {
-            // "Double Back to Exit" Logic
+            // Check for double back to exit logic if needed
+        }
+    };
+
+    const capBackHandler = CapacitorApp.addListener('backButton', () => {
+        const handled = handleGoBack();
+        if (!handled && view === 'home') {
             const currentTime = Date.now();
             if (currentTime - lastBackPressTime.current < 2000) {
                 CapacitorApp.exitApp();
@@ -135,20 +140,14 @@ const App: React.FC = () => {
         }
     });
 
-    // Browser Fallback (popstate)
-    const onPopState = (e: PopStateEvent) => {
-        handleGoBack();
-    };
     window.addEventListener('popstate', onPopState);
-
     return () => {
-        backButtonHandler.then(h => h.remove());
         window.removeEventListener('popstate', onPopState);
+        capBackHandler.then(h => h.remove());
     };
   }, [handleGoBack, view]);
 
-  // --- 🔔 FIREBASE & DATA LOGIC ---
-  
+  // --- FIREBASE DATA LOGIC ---
   const triggerNativeNotification = (title: string, body: string) => {
       if (!('Notification' in window) || Notification.permission !== 'granted') return;
       navigator.serviceWorker.ready.then((registration) => {
