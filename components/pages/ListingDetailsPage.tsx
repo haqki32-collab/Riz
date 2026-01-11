@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Listing, User, Review } from '../../types';
 import { db } from '../../firebaseConfig';
 import { doc, updateDoc, arrayUnion, arrayRemove, increment, getDoc, setDoc } from 'firebase/firestore';
@@ -30,6 +30,10 @@ const ListingDetailsPage: React.FC<ListingDetailsPageProps> = ({ listing, listin
     // Carousel State
     const images = useMemo(() => listing.images && listing.images.length > 0 ? listing.images : [listing.imageUrl], [listing]);
     const [activeIndex, setActiveIndex] = useState(0);
+    const [isFullscreen, setIsFullscreen] = useState(false);
+    
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const fullscreenScrollRef = useRef<HTMLDivElement>(null);
     
     const [isFavorite, setIsFavorite] = useState(false);
 
@@ -44,6 +48,7 @@ const ListingDetailsPage: React.FC<ListingDetailsPageProps> = ({ listing, listin
     useEffect(() => {
         setReviews(listing.reviews || []);
         setActiveIndex(0);
+        if (scrollRef.current) scrollRef.current.scrollLeft = 0;
         window.scrollTo(0, 0);
     }, [listing.id]);
 
@@ -61,6 +66,44 @@ const ListingDetailsPage: React.FC<ListingDetailsPageProps> = ({ listing, listin
         };
         fetchVendorInfo();
     }, [listing.vendorId]);
+
+    // Handle carousel scroll synchronization
+    const handleScroll = (e: React.UIEvent<HTMLDivElement>, isFs: boolean) => {
+        const target = e.currentTarget;
+        const width = target.clientWidth;
+        const index = Math.round(target.scrollLeft / width);
+        if (index !== activeIndex && index >= 0 && index < images.length) {
+            setActiveIndex(index);
+        }
+    };
+
+    const scrollToImage = (index: number, isFs: boolean) => {
+        const ref = isFs ? fullscreenScrollRef : scrollRef;
+        if (ref.current) {
+            const width = ref.current.clientWidth;
+            ref.current.scrollTo({
+                left: index * width,
+                behavior: 'smooth'
+            });
+        }
+    };
+
+    // When fullscreen opens, ensure it's at the right index
+    useEffect(() => {
+        if (isFullscreen && fullscreenScrollRef.current) {
+            const width = fullscreenScrollRef.current.clientWidth;
+            fullscreenScrollRef.current.scrollLeft = activeIndex * width;
+        }
+    }, [isFullscreen]);
+
+    // Sync back when closing fullscreen
+    const closeFullscreen = () => {
+        setIsFullscreen(false);
+        if (scrollRef.current) {
+            const width = scrollRef.current.clientWidth;
+            scrollRef.current.scrollLeft = activeIndex * width;
+        }
+    };
 
     const handleToggleFavorite = async () => {
         if (!user) { alert("Please login to save favorites."); return; }
@@ -117,53 +160,94 @@ const ListingDetailsPage: React.FC<ListingDetailsPageProps> = ({ listing, listin
     const discountPercent = listing.originalPrice ? Math.round(((listing.originalPrice - listing.price) / listing.originalPrice) * 100) : 0;
 
   return (
-    <div className="bg-gray-50 dark:bg-black min-h-screen pb-10 animate-fade-in">
-      {/* 📸 GALLERY SECTION */}
-      <div className="w-full bg-black relative aspect-[4/3] md:aspect-[16/7] overflow-hidden group shadow-lg">
-          <img src={images[activeIndex]} alt={listing.title} className="w-full h-full object-contain transition-all duration-300" />
-          
-          {images.length > 1 && (
-              <>
-                <button 
-                    onClick={() => setActiveIndex(prev => (prev === 0 ? images.length - 1 : prev - 1))}
-                    className="absolute left-2 top-1/2 -translate-y-1/2 p-3 bg-black/40 text-white rounded-full backdrop-blur-md z-20 active:scale-90 transition-transform"
-                >
-                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M15 19l-7-7 7-7" /></svg>
-                </button>
-                <button 
-                    onClick={() => setActiveIndex(prev => (prev === images.length - 1 ? 0 : prev + 1))}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-black/40 text-white rounded-full backdrop-blur-md z-20 active:scale-90 transition-transform"
-                >
-                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M9 5l7 7-7 7" /></svg>
-                </button>
-              </>
-          )}
+    <div className="bg-gray-50 dark:bg-black min-h-screen pb-10 animate-fade-in overflow-x-hidden">
+      
+      {/* 🖼️ FULLSCREEN LIGHTBOX VIEWER */}
+      {isFullscreen && (
+          <div className="fixed inset-0 z-[1000] bg-black flex flex-col animate-fade-in">
+              <div className="absolute top-0 left-0 right-0 p-6 flex justify-between items-center z-[1010] bg-gradient-to-b from-black/80 to-transparent">
+                  <div className="text-white text-sm font-black tracking-widest uppercase">
+                      {activeIndex + 1} / {images.length}
+                  </div>
+                  <button onClick={closeFullscreen} className="p-2 bg-white/10 backdrop-blur-xl rounded-full text-white active:scale-90 transition-transform">
+                      <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+              </div>
 
-          <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center bg-gradient-to-b from-black/70 to-transparent z-30">
-              <button onClick={() => onNavigate('listings')} className="p-2 bg-white/20 backdrop-blur-lg rounded-full text-white shadow-xl active:scale-90 transition-transform">
+              <div 
+                ref={fullscreenScrollRef}
+                onScroll={(e) => handleScroll(e, true)}
+                className="flex-1 flex overflow-x-auto snap-x snap-mandatory no-scrollbar"
+              >
+                  {images.map((img, idx) => (
+                      <div key={`fs-${idx}`} className="min-w-full h-full snap-center flex items-center justify-center p-2">
+                          <img src={img} className="max-w-full max-h-full object-contain select-none" alt="" />
+                      </div>
+                  ))}
+              </div>
+
+              <div className="p-6 bg-gradient-to-t from-black/80 to-transparent flex justify-center gap-2 overflow-x-auto no-scrollbar">
+                   {images.map((_, idx) => (
+                       <button 
+                        key={`dot-${idx}`} 
+                        onClick={() => scrollToImage(idx, true)}
+                        className={`h-1.5 transition-all duration-300 rounded-full ${activeIndex === idx ? 'w-8 bg-primary' : 'w-2 bg-white/30'}`}
+                       />
+                   ))}
+              </div>
+          </div>
+      )}
+
+      {/* 📸 GALLERY SECTION (TRUE EDGE-TO-EDGE) */}
+      <div className="w-screen md:w-full bg-gray-100 dark:bg-gray-900 relative aspect-[1/1] md:aspect-[16/7] overflow-hidden group shadow-lg -mx-4 md:mx-0">
+          
+          {/* Scroll Container */}
+          <div 
+            ref={scrollRef}
+            onScroll={(e) => handleScroll(e, false)}
+            className="flex w-full h-full overflow-x-auto snap-x snap-mandatory no-scrollbar cursor-zoom-in"
+            style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+            onClick={() => setIsFullscreen(true)}
+          >
+              {images.map((img, idx) => (
+                  <div key={idx} className="min-w-full h-full snap-center flex items-center justify-center bg-white dark:bg-black">
+                      <img 
+                        src={img} 
+                        alt={`${listing.title} - ${idx + 1}`} 
+                        className="w-full h-full object-cover" 
+                      />
+                  </div>
+              ))}
+          </div>
+
+          {/* Top Overlays */}
+          <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center bg-gradient-to-b from-black/50 to-transparent z-30 pointer-events-none">
+              <button onClick={() => onNavigate('listings')} className="p-2 bg-black/30 backdrop-blur-md rounded-full text-white shadow-xl active:scale-90 transition-transform pointer-events-auto">
                   <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" /></svg>
               </button>
-              <div className="flex gap-2">
-                <button onClick={handleToggleFavorite} className={`p-2.5 bg-white/20 backdrop-blur-lg rounded-full shadow-xl active:scale-90 transition-all ${isFavorite ? 'text-red-500' : 'text-white'}`}>
+              <div className="flex gap-2 pointer-events-auto">
+                <button onClick={handleToggleFavorite} className={`p-2.5 bg-black/30 backdrop-blur-md rounded-full shadow-xl active:scale-90 transition-all ${isFavorite ? 'text-red-500' : 'text-white'}`}>
                     <svg className="w-6 h-6" fill={isFavorite ? "currentColor" : "none"} viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" /></svg>
                 </button>
               </div>
           </div>
 
+          {/* Counter Badge */}
           {images.length > 1 && (
-            <div className="absolute bottom-4 right-4 bg-black/50 text-white text-[10px] font-black px-3 py-1 rounded-full backdrop-blur-md select-none border border-white/10 z-20">
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/40 text-white text-[10px] font-black px-3 py-1 rounded-full backdrop-blur-md border border-white/10 z-20 shadow-lg tracking-widest">
                 {activeIndex + 1} / {images.length}
             </div>
           )}
       </div>
 
+      {/* Thumbnails Row */}
       {images.length > 1 && (
-          <div className="bg-white dark:bg-dark-surface p-3 flex gap-2.5 overflow-x-auto no-scrollbar border-b border-gray-100 dark:border-gray-800">
+          <div className="bg-white dark:bg-dark-surface p-3 flex gap-2.5 overflow-x-auto no-scrollbar border-b border-gray-100 dark:border-gray-800 -mx-4 md:mx-0 w-screen md:w-full px-4">
               {images.map((img, idx) => (
                   <button 
                     key={idx} 
-                    onClick={() => setActiveIndex(idx)}
-                    className={`relative min-w-[70px] h-[70px] rounded-xl overflow-hidden border-2 transition-all ${activeIndex === idx ? 'border-primary ring-2 ring-primary/20 scale-105 shadow-md' : 'border-transparent opacity-50'}`}
+                    onClick={() => scrollToImage(idx, false)}
+                    className={`relative min-w-[70px] h-[70px] rounded-xl overflow-hidden border-2 transition-all duration-300 ${activeIndex === idx ? 'border-primary ring-2 ring-primary/20 scale-105 shadow-md' : 'border-transparent opacity-40'}`}
                   >
                       <img src={img} className="w-full h-full object-cover" alt="" />
                   </button>
@@ -200,7 +284,7 @@ const ListingDetailsPage: React.FC<ListingDetailsPageProps> = ({ listing, listin
           </div>
       </SectionWrapper>
 
-      {/* 🚀 CALL TO ACTION SECTION - HIGH VISIBILITY POSITION */}
+      {/* 🚀 CALL TO ACTION SECTION */}
       <SectionWrapper className="!bg-primary/5 dark:!bg-primary/10">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <button 
