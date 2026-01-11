@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { User, AppView, NavigatePayload } from '../../types';
-import { doc, deleteDoc, setDoc, addDoc, collection } from 'firebase/firestore';
+import { doc, deleteDoc, setDoc } from 'firebase/firestore';
 import { deleteUser } from 'firebase/auth';
 import { db, auth } from '../../firebaseConfig';
 
@@ -19,7 +19,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ user, onNavigate, currentTh
     email: user.notifications?.email ?? false,
     sms: user.notifications?.sms ?? true,
   });
-  const [testingNotif, setTestingNotif] = useState(false);
 
   useEffect(() => {
       if (db && user.id) {
@@ -32,43 +31,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ user, onNavigate, currentTh
 
   const toggleNotification = (type: keyof typeof notifications) => {
     setNotifications(prev => ({ ...prev, [type]: !prev[type] }));
-  };
-
-  const sendTestNotification = async () => {
-      if (!user.id) return;
-      setTestingNotif(true);
-      
-      const title = "Test Alert! 🚀";
-      const message = "Mubarak ho! Aapka notification tray system bilkul sahi kaam kar raha hai.";
-
-      // 1. Trigger Native Status Bar Notification
-      if ('Notification' in window && Notification.permission === 'granted') {
-          navigator.serviceWorker.ready.then((registration) => {
-              // Fix: Type assertion to 'any' to bypass TS errors for potentially missing 'vibrate' or 'badge' in NotificationOptions
-              registration.showNotification(title, {
-                  body: message,
-                  icon: '/icon.png',
-                  vibrate: [100, 50, 100],
-                  badge: '/favicon.ico'
-              } as any);
-          });
-      }
-
-      // 2. Log to Firestore for history
-      if (db) {
-          try {
-              await addDoc(collection(db, 'notifications'), {
-                  userId: user.id,
-                  title: title,
-                  message: message,
-                  type: 'success',
-                  isRead: false,
-                  createdAt: new Date().toISOString()
-              });
-          } catch(e) {}
-      }
-      
-      setTimeout(() => setTestingNotif(false), 1500);
   };
 
   const handleDeleteAccount = async () => {
@@ -124,13 +86,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ user, onNavigate, currentTh
                 <input type="checkbox" checked={notifications.push} onChange={() => toggleNotification('push')} className="h-6 w-6 text-primary rounded-lg" />
             </div>
             <hr className="border-gray-50 dark:border-gray-800" />
-            <button 
-                onClick={sendTestNotification} 
-                disabled={testingNotif}
-                className="w-full py-4 bg-primary/5 text-primary border-2 border-primary/10 rounded-2xl font-black text-xs uppercase tracking-widest active:scale-95 transition-all flex items-center justify-center gap-3"
-            >
-                {testingNotif ? 'Sending...' : 'Send Test Notification 🚀'}
-            </button>
+            <div className="text-center p-2 text-[10px] text-gray-400 uppercase font-black tracking-widest">
+                Notifications Managed by System
+            </div>
           </div>
         </div>
 
